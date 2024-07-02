@@ -10,7 +10,6 @@ import (
 
 func TestTimer_NegativeDuration(t *testing.T) {
 	t.Parallel()
-	// nolint:gocritic // trying to avoid Coder-specific stuff with an eye toward spinning this out
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -47,7 +46,6 @@ func TestTimer_NegativeDuration(t *testing.T) {
 
 func TestAfterFunc_NegativeDuration(t *testing.T) {
 	t.Parallel()
-	// nolint:gocritic // trying to avoid Coder-specific stuff with an eye toward spinning this out
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -83,7 +81,6 @@ func TestAfterFunc_NegativeDuration(t *testing.T) {
 
 func TestNewTicker(t *testing.T) {
 	t.Parallel()
-	// nolint:gocritic // trying to avoid Coder-specific stuff with an eye toward spinning this out
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -170,7 +167,6 @@ func TestNewTicker(t *testing.T) {
 
 func TestPeek(t *testing.T) {
 	t.Parallel()
-	// nolint:gocritic // trying to avoid Coder-specific stuff with an eye toward spinning this out
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

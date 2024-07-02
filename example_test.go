@@ -40,7 +40,6 @@ func newExampleTickCounter(ctx context.Context, clk quartz.Clock) *exampleTickCo
 // TestExampleTickerFunc demonstrates how to test the use of TickerFunc.
 func TestExampleTickerFunc(t *testing.T) {
 	t.Parallel()
-	// nolint:gocritic // trying to avoid Coder-specific stuff with an eye toward spinning this out
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -111,7 +110,6 @@ func (m *exampleLatencyMeasurer) LastLatency() time.Duration {
 func TestExampleLatencyMeasurer(t *testing.T) {
 	t.Parallel()
 
-	// nolint:gocritic // trying to avoid Coder-specific stuff with an eye toward spinning this out
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
