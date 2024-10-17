@@ -2,6 +2,7 @@ package quartz_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -209,4 +210,108 @@ func TestPeek(t *testing.T) {
 	if ok {
 		t.Fatal("expected Peek() to return false")
 	}
+}
+
+// TestTickerFunc_ContextDoneDuringTick tests that TickerFunc.Wait() can't return while the tick
+// function callback is in progress.
+func TestTickerFunc_ContextDoneDuringTick(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	mClock := quartz.NewMock(t)
+
+	tickStart := make(chan struct{})
+	tickDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(testCtx)
+	defer cancel()
+	tkr := mClock.TickerFunc(ctx, time.Second, func() error {
+		close(tickStart)
+		select {
+		case <-tickDone:
+		case <-testCtx.Done():
+			t.Error("timeout waiting for tickDone")
+		}
+		return nil
+	})
+	w := mClock.Advance(time.Second)
+	select {
+	case <-tickStart:
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for tickStart")
+	}
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- tkr.Wait()
+	}()
+	cancel()
+	select {
+	case <-waitErr:
+		t.Fatal("wait should not return while tick callback in progress")
+	case <-time.After(time.Millisecond * 100):
+		// OK
+	}
+	close(tickDone)
+	select {
+	case err := <-waitErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("expected context.Canceled error")
+		}
+	case <-testCtx.Done():
+		t.Fatal("timed out waiting for wait to finish")
+	}
+	w.MustWait(testCtx)
+}
+
+// TestTickerFunc_LongCallback tests that we don't call the ticker func a second time while the
+// first is still executing.
+func TestTickerFunc_LongCallback(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	mClock := quartz.NewMock(t)
+
+	expectedErr := errors.New("callback error")
+	tickStart := make(chan struct{})
+	tickDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(testCtx)
+	defer cancel()
+	tkr := mClock.TickerFunc(ctx, time.Second, func() error {
+		close(tickStart)
+		select {
+		case <-tickDone:
+		case <-testCtx.Done():
+			t.Error("timeout waiting for tickDone")
+		}
+		return expectedErr
+	})
+	w := mClock.Advance(time.Second)
+	select {
+	case <-tickStart:
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for tickStart")
+	}
+	// second tick completes immediately, since it doesn't actually call the
+	// ticker function.
+	mClock.Advance(time.Second).MustWait(testCtx)
+
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- tkr.Wait()
+	}()
+	cancel()
+	close(tickDone)
+
+	select {
+	case err := <-waitErr:
+		// we should get the function error, not the context error, since context was canceled while
+		// we were calling the function, and it returned an error.
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("wrong error: %s", err)
+		}
+	case <-testCtx.Done():
+		t.Fatal("timed out waiting for wait to finish")
+	}
+	w.MustWait(testCtx)
 }

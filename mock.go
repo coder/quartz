@@ -466,6 +466,8 @@ type mockTickerFunc struct {
 
 	// cond is a condition Locked on the main Mock.mu
 	cond *sync.Cond
+	// inProgress is true when we are actively calling f
+	inProgress bool
 	// done is true when the ticker exits
 	done bool
 	// err holds the error when the ticker exits
@@ -479,15 +481,18 @@ func (m *mockTickerFunc) next() time.Time {
 func (m *mockTickerFunc) fire(_ time.Time) {
 	m.mock.mu.Lock()
 	defer m.mock.mu.Unlock()
-	if m.done {
+	if m.done || m.inProgress {
 		return
 	}
 	m.nxt = m.nxt.Add(m.d)
 	m.mock.recomputeNextLocked()
 
+	m.inProgress = true
 	m.mock.mu.Unlock()
 	err := m.f()
 	m.mock.mu.Lock()
+	m.inProgress = false
+	m.cond.Broadcast() // wake up anything waiting for f to finish
 	if err != nil {
 		m.exitLocked(err)
 	}
@@ -507,6 +512,9 @@ func (m *mockTickerFunc) waitForCtx() {
 	<-m.ctx.Done()
 	m.mock.mu.Lock()
 	defer m.mock.mu.Unlock()
+	for m.inProgress {
+		m.cond.Wait()
+	}
 	m.exitLocked(m.ctx.Err())
 }
 
