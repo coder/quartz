@@ -292,9 +292,13 @@ func TestTickerFunc_LongCallback(t *testing.T) {
 	case <-testCtx.Done():
 		t.Fatal("timeout waiting for tickStart")
 	}
-	// second tick completes immediately, since it doesn't actually call the
-	// ticker function.
-	mClock.Advance(time.Second).MustWait(testCtx)
+	// additional ticks complete immediately.
+	elapsed := time.Duration(0)
+	for elapsed < 5*time.Second {
+		d, wt := mClock.AdvanceNext()
+		elapsed += d
+		wt.MustWait(testCtx)
+	}
 
 	waitErr := make(chan error, 1)
 	go func() {
