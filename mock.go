@@ -480,17 +480,24 @@ func (m *mockTickerFunc) next() time.Time {
 
 func (m *mockTickerFunc) fire(_ time.Time) {
 	m.mock.mu.Lock()
-	defer m.mock.mu.Unlock()
-	if m.done || m.inProgress {
+	if m.done {
+		m.mock.mu.Unlock()
 		return
 	}
 	m.nxt = m.nxt.Add(m.d)
 	m.mock.recomputeNextLocked()
+	// we need this check to happen after we've computed the next tick,
+	// otherwise it will be immediately rescheduled.
+	if m.inProgress {
+		m.mock.mu.Unlock()
+		return
+	}
 
 	m.inProgress = true
 	m.mock.mu.Unlock()
 	err := m.f()
 	m.mock.mu.Lock()
+	defer m.mock.mu.Unlock()
 	m.inProgress = false
 	m.cond.Broadcast() // wake up anything waiting for f to finish
 	if err != nil {
