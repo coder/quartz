@@ -24,7 +24,7 @@ func TestTimer_NegativeDuration(t *testing.T) {
 		timers <- mClock.NewTimer(-time.Second)
 	}()
 	c := trap.MustWait(ctx)
-	c.Release()
+	c.MustRelease(ctx)
 	// trap returns the actual passed value
 	if c.Duration != -time.Second {
 		t.Fatalf("expected -time.Second, got: %v", c.Duration)
@@ -62,7 +62,7 @@ func TestAfterFunc_NegativeDuration(t *testing.T) {
 		})
 	}()
 	c := trap.MustWait(ctx)
-	c.Release()
+	c.MustRelease(ctx)
 	// trap returns the actual passed value
 	if c.Duration != -time.Second {
 		t.Fatalf("expected -time.Second, got: %v", c.Duration)
@@ -99,7 +99,7 @@ func TestNewTicker(t *testing.T) {
 		tickers <- mClock.NewTicker(time.Hour, "new")
 	}()
 	c := trapNT.MustWait(ctx)
-	c.Release()
+	c.MustRelease(ctx)
 	if c.Duration != time.Hour {
 		t.Fatalf("expected time.Hour, got: %v", c.Duration)
 	}
@@ -123,7 +123,7 @@ func TestNewTicker(t *testing.T) {
 	go tkr.Reset(time.Minute, "reset")
 	c = trapReset.MustWait(ctx)
 	mClock.Advance(time.Second).MustWait(ctx)
-	c.Release()
+	c.MustRelease(ctx)
 	if c.Duration != time.Minute {
 		t.Fatalf("expected time.Minute, got: %v", c.Duration)
 	}
@@ -142,7 +142,7 @@ func TestNewTicker(t *testing.T) {
 	}
 
 	go tkr.Stop("stop")
-	trapStop.MustWait(ctx).Release()
+	trapStop.MustWait(ctx).MustRelease(ctx)
 	mClock.Advance(time.Hour).MustWait(ctx)
 	select {
 	case <-tkr.C:
@@ -153,7 +153,7 @@ func TestNewTicker(t *testing.T) {
 
 	// Resetting after stop
 	go tkr.Reset(time.Minute, "reset")
-	trapReset.MustWait(ctx).Release()
+	trapReset.MustWait(ctx).MustRelease(ctx)
 	mClock.Advance(time.Minute).MustWait(ctx)
 	tTime = mClock.Now()
 	select {
@@ -344,11 +344,11 @@ func Test_MultipleTraps(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c0.Release()
+		c0.MustRelease(testCtx)
 	}()
 	c1 := trap1.MustWait(testCtx)
 	mClock.Advance(time.Second)
-	c1.Release()
+	c1.MustRelease(testCtx)
 
 	select {
 	case <-done:
@@ -365,6 +365,28 @@ func Test_MultipleTraps(t *testing.T) {
 	case <-testCtx.Done():
 		t.Fatal("timed out waiting for Now()")
 	}
+}
+
+func Test_MultipleTrapsDeadlock(t *testing.T) {
+	t.Parallel()
+	tRunFail(t, func(t testing.TB) {
+		testCtx, testCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer testCancel()
+		mClock := quartz.NewMock(t)
+
+		trap0 := mClock.Trap().Now("0")
+		defer trap0.Close()
+		trap1 := mClock.Trap().Now("1")
+		defer trap1.Close()
+
+		timeCh := make(chan time.Time)
+		go func() {
+			timeCh <- mClock.Now("0", "1")
+		}()
+
+		c0 := trap0.MustWait(testCtx)
+		c0.MustRelease(testCtx) // deadlocks, test failure
+	})
 }
 
 func Test_UnreleasedCalls(t *testing.T) {

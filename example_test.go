@@ -65,7 +65,7 @@ func TestExampleTickerFunc(t *testing.T) {
 	// it's good practice to release calls before any possible t.Fatal() calls
 	// so that we don't leave dangling goroutines waiting for the call to be
 	// released.
-	call.Release()
+	call.MustRelease(ctx)
 	if call.Duration != time.Hour {
 		t.Fatal("unexpected duration")
 	}
@@ -122,7 +122,7 @@ func TestExampleLatencyMeasurer(t *testing.T) {
 	w := mClock.Advance(10 * time.Second) // triggers first tick
 	c := trap.MustWait(ctx)               // call to Since()
 	mClock.Advance(33 * time.Millisecond)
-	c.Release()
+	c.MustRelease(ctx)
 	w.MustWait(ctx)
 
 	if l := lm.LastLatency(); l != 33*time.Millisecond {
@@ -133,7 +133,7 @@ func TestExampleLatencyMeasurer(t *testing.T) {
 	d, w2 := mClock.AdvanceNext()
 	c = trap.MustWait(ctx)
 	mClock.Advance(17 * time.Millisecond)
-	c.Release()
+	c.MustRelease(ctx)
 	w2.MustWait(ctx)
 
 	expectedD := 10*time.Second - 33*time.Millisecond
