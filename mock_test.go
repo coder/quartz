@@ -368,18 +368,68 @@ func Test_MultipleTraps(t *testing.T) {
 }
 
 func Test_UnreleasedCalls(t *testing.T) {
-	t.Skip("this test is meant to demonstrate how unreleased calls fail")
 	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-	mClock := quartz.NewMock(t)
+	tRunFail(t, func(t testing.TB) {
+		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer testCancel()
+		mClock := quartz.NewMock(t)
 
-	trap := mClock.Trap().Now()
-	defer trap.Close()
+		trap := mClock.Trap().Now()
+		defer trap.Close()
 
-	go func() {
-		_ = mClock.Now()
-	}()
+		go func() {
+			_ = mClock.Now()
+		}()
 
-	trap.MustWait(testCtx) // missing release
+		trap.MustWait(testCtx) // missing release
+	})
+}
+
+type captureFailTB struct {
+	failed bool
+	testing.TB
+}
+
+func (t *captureFailTB) Errorf(format string, args ...any) {
+	t.Helper()
+	t.Logf(format, args...)
+	t.failed = true
+}
+
+func (t *captureFailTB) Error(args ...any) {
+	t.Helper()
+	t.Log(args...)
+	t.failed = true
+}
+
+func (t *captureFailTB) Fatal(args ...any) {
+	t.Helper()
+	t.Log(args...)
+	t.failed = true
+}
+
+func (t *captureFailTB) Fatalf(format string, args ...any) {
+	t.Helper()
+	t.Logf(format, args...)
+	t.failed = true
+}
+
+func (t *captureFailTB) Fail() {
+	t.failed = true
+}
+
+func (t *captureFailTB) FailNow() {
+	t.failed = true
+}
+
+func (t *captureFailTB) Failed() bool {
+	return t.failed
+}
+
+func tRunFail(t testing.TB, f func(t testing.TB)) {
+	tb := &captureFailTB{TB: t}
+	f(tb)
+	if !tb.Failed() {
+		t.Fatal("want test to fail")
+	}
 }
