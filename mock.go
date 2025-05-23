@@ -589,7 +589,7 @@ func (c clockFunction) String() string {
 	case clockFunctionUntil:
 		return "Until"
 	default:
-		return "?????"
+		return fmt.Sprintf("Unknown clockFunction(%d)", c)
 	}
 }
 
@@ -633,7 +633,7 @@ func (a *apiCall) String() string {
 	case clockFunctionUntil:
 		return fmt.Sprintf("Until(%s, %v)", a.Time, a.Tags)
 	default:
-		return "?????"
+		return fmt.Sprintf("Unknown clockFunction(%d)", a.fn)
 	}
 }
 
