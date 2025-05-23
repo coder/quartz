@@ -197,6 +197,7 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 			traps = append(traps, t)
 		}
 	}
+	m.tb.Logf("Mock Clock - %s call, matched %d traps", c, len(traps))
 	if len(traps) == 0 {
 		return
 	}
@@ -260,6 +261,7 @@ func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	m.mu.Lock()
+	m.tb.Logf("Mock Clock - Advance(%s)", d)
 	fin := m.cur.Add(d)
 	// nextTime.IsZero implies no events scheduled.
 	if m.nextTime.IsZero() || fin.Before(m.nextTime) {
@@ -307,6 +309,7 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	m.mu.Lock()
+	m.tb.Logf("Mock Clock - Set(%s)", t)
 	if t.Before(m.cur) {
 		defer close(w.ch)
 		defer m.mu.Unlock()
@@ -343,6 +346,7 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 // wait for the timer/tick event(s) to finish.
 func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 	m.mu.Lock()
+	m.tb.Logf("Mock Clock - AdvanceNext()")
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	if m.nextTime.IsZero() {
@@ -431,6 +435,7 @@ func (m *Mock) Trap() Trapper {
 func (m *Mock) newTrap(fn clockFunction, tags []string) *Trap {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.tb.Logf("Mock Clock - Trap %s(..., %v)", fn, tags)
 	tr := &Trap{
 		fn:    fn,
 		tags:  tags,
@@ -557,6 +562,37 @@ const (
 	clockFunctionUntil
 )
 
+func (c clockFunction) String() string {
+	switch c {
+	case clockFunctionNewTimer:
+		return "NewTimer"
+	case clockFunctionAfterFunc:
+		return "AfterFunc"
+	case clockFunctionTimerStop:
+		return "Timer.Stop"
+	case clockFunctionTimerReset:
+		return "Timer.Reset"
+	case clockFunctionTickerFunc:
+		return "TickerFunc"
+	case clockFunctionTickerFuncWait:
+		return "TickerFunc.Wait"
+	case clockFunctionNewTicker:
+		return "NewTicker"
+	case clockFunctionTickerReset:
+		return "Ticker.Reset"
+	case clockFunctionTickerStop:
+		return "Ticker.Stop"
+	case clockFunctionNow:
+		return "Now"
+	case clockFunctionSince:
+		return "Since"
+	case clockFunctionUntil:
+		return "Until"
+	default:
+		return "?????"
+	}
+}
+
 type callArg func(c *apiCall)
 
 // apiCall represents a single call to one of the Clock APIs.
@@ -568,6 +604,37 @@ type apiCall struct {
 	fn       clockFunction
 	releases sync.WaitGroup
 	complete chan struct{}
+}
+
+func (a *apiCall) String() string {
+	switch a.fn {
+	case clockFunctionNewTimer:
+		return fmt.Sprintf("NewTimer(%s, %v)", a.Duration, a.Tags)
+	case clockFunctionAfterFunc:
+		return fmt.Sprintf("AfterFunc(%s, <fn>, %v)", a.Duration, a.Tags)
+	case clockFunctionTimerStop:
+		return fmt.Sprintf("Timer.Stop(%v)", a.Tags)
+	case clockFunctionTimerReset:
+		return fmt.Sprintf("Timer.Reset(%s, %v)", a.Duration, a.Tags)
+	case clockFunctionTickerFunc:
+		return fmt.Sprintf("TickerFunc(<ctx>, %s, <fn>, %s)", a.Duration, a.Tags)
+	case clockFunctionTickerFuncWait:
+		return fmt.Sprintf("TickerFunc.Wait(%v)", a.Tags)
+	case clockFunctionNewTicker:
+		return fmt.Sprintf("NewTicker(%s, %v)", a.Duration, a.Tags)
+	case clockFunctionTickerReset:
+		return fmt.Sprintf("Ticker.Reset(%s, %v)", a.Duration, a.Tags)
+	case clockFunctionTickerStop:
+		return fmt.Sprintf("Ticker.Stop(%v)", a.Tags)
+	case clockFunctionNow:
+		return fmt.Sprintf("Now(%v)", a.Tags)
+	case clockFunctionSince:
+		return fmt.Sprintf("Since(%s, %v)", a.Time, a.Tags)
+	case clockFunctionUntil:
+		return fmt.Sprintf("Until(%s, %v)", a.Time, a.Tags)
+	default:
+		return "?????"
+	}
 }
 
 // Call represents an apiCall that has been trapped.
