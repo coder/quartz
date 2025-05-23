@@ -643,14 +643,38 @@ type Call struct {
 	Duration time.Duration
 	Tags     []string
 
+	tb      testing.TB
 	apiCall *apiCall
 	trap    *Trap
 }
 
-func (c *Call) Release() {
+// Release the call and wait for it to complete. If the provided context expires before the call completes, it returns
+// an error.
+//
+// IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
+// they must do so from different goroutines.
+func (c *Call) Release(ctx context.Context) error {
 	c.apiCall.releases.Done()
-	<-c.apiCall.complete
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("timed out waiting for release; did more than one trap capture the call?: %w", ctx.Err())
+	case <-c.apiCall.complete:
+		// OK
+	}
 	c.trap.callReleased()
+	return nil
+}
+
+// MustRelease releases the call and waits for it to complete. If the provided context expires before the call
+// completes, it fails the test.
+//
+// IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
+// they must do so from different goroutines.
+func (c *Call) MustRelease(ctx context.Context) {
+	if err := c.Release(ctx); err != nil {
+		c.tb.Helper()
+		c.tb.Fatal(err.Error())
+	}
 }
 
 func withTime(t time.Time) callArg {
@@ -745,6 +769,7 @@ func (t *Trap) Wait(ctx context.Context) (*Call, error) {
 			Tags:     a.Tags,
 			apiCall:  a,
 			trap:     t,
+			tb:       t.mock.tb,
 		}
 		t.mu.Lock()
 		defer t.mu.Unlock()
