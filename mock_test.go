@@ -319,3 +319,67 @@ func TestTickerFunc_LongCallback(t *testing.T) {
 	}
 	w.MustWait(testCtx)
 }
+
+func Test_MultipleTraps(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	mClock := quartz.NewMock(t)
+
+	trap0 := mClock.Trap().Now("0")
+	defer trap0.Close()
+	trap1 := mClock.Trap().Now("1")
+	defer trap1.Close()
+
+	timeCh := make(chan time.Time)
+	go func() {
+		timeCh <- mClock.Now("0", "1")
+	}()
+
+	c0 := trap0.MustWait(testCtx)
+	mClock.Advance(time.Second)
+	// the two trapped call instances need to be released on separate goroutines since they each wait for the Now() call
+	// to return, which is blocked on both releases happening. If you release them on the same goroutine, in either
+	// order, it will deadlock.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c0.Release()
+	}()
+	c1 := trap1.MustWait(testCtx)
+	mClock.Advance(time.Second)
+	c1.Release()
+
+	select {
+	case <-done:
+	case <-testCtx.Done():
+		t.Fatal("timed out waiting for c0.Release()")
+	}
+
+	select {
+	case got := <-timeCh:
+		end := mClock.Now("end")
+		if !got.Equal(end) {
+			t.Fatalf("expected %s got %s", end, got)
+		}
+	case <-testCtx.Done():
+		t.Fatal("timed out waiting for Now()")
+	}
+}
+
+func Test_UnreleasedCalls(t *testing.T) {
+	t.Skip("this test is meant to demonstrate how unreleased calls fail")
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	mClock := quartz.NewMock(t)
+
+	trap := mClock.Trap().Now()
+	defer trap.Close()
+
+	go func() {
+		_ = mClock.Now()
+	}()
+
+	trap.MustWait(testCtx) // missing release
+}
