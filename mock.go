@@ -13,8 +13,9 @@ import (
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
 // during a test, triggering any timers or tickers automatically.
 type Mock struct {
-	tb testing.TB
-	mu sync.Mutex
+	tb       testing.TB
+	mu       sync.Mutex
+	testOver bool
 
 	// cur is the current time
 	cur time.Time
@@ -197,7 +198,9 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 			traps = append(traps, t)
 		}
 	}
-	m.tb.Logf("Mock Clock - %s call, matched %d traps", c, len(traps))
+	if !m.testOver {
+		m.tb.Logf("Mock Clock - %s call, matched %d traps", c, len(traps))
+	}
 	if len(traps) == 0 {
 		return
 	}
@@ -261,7 +264,9 @@ func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	m.mu.Lock()
-	m.tb.Logf("Mock Clock - Advance(%s)", d)
+	if !m.testOver {
+		m.tb.Logf("Mock Clock - Advance(%s)", d)
+	}
 	fin := m.cur.Add(d)
 	// nextTime.IsZero implies no events scheduled.
 	if m.nextTime.IsZero() || fin.Before(m.nextTime) {
@@ -309,7 +314,9 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	m.mu.Lock()
-	m.tb.Logf("Mock Clock - Set(%s)", t)
+	if !m.testOver {
+		m.tb.Logf("Mock Clock - Set(%s)", t)
+	}
 	if t.Before(m.cur) {
 		defer close(w.ch)
 		defer m.mu.Unlock()
@@ -346,7 +353,9 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 // wait for the timer/tick event(s) to finish.
 func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 	m.mu.Lock()
-	m.tb.Logf("Mock Clock - AdvanceNext()")
+	if !m.testOver {
+		m.tb.Logf("Mock Clock - AdvanceNext()")
+	}
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	if m.nextTime.IsZero() {
@@ -435,7 +444,9 @@ func (m *Mock) Trap() Trapper {
 func (m *Mock) newTrap(fn clockFunction, tags []string) *Trap {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.tb.Logf("Mock Clock - Trap %s(..., %v)", fn, tags)
+	if !m.testOver {
+		m.tb.Logf("Mock Clock - Trap %s(..., %v)", fn, tags)
+	}
 	tr := &Trap{
 		fn:    fn,
 		tags:  tags,
@@ -455,10 +466,17 @@ func NewMock(tb testing.TB) *Mock {
 	if err != nil {
 		panic(err)
 	}
-	return &Mock{
+	m := &Mock{
 		tb:  tb,
 		cur: cur,
 	}
+	tb.Cleanup(func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.testOver = true
+		tb.Logf("Mock Clock - test cleanup; will no longer log clock events")
+	})
+	return m
 }
 
 var _ Clock = &Mock{}
