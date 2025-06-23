@@ -14,6 +14,7 @@ import (
 // during a test, triggering any timers or tickers automatically.
 type Mock struct {
 	tb       testing.TB
+	logger   Logger
 	mu       sync.Mutex
 	testOver bool
 
@@ -199,7 +200,7 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 		}
 	}
 	if !m.testOver {
-		m.tb.Logf("Mock Clock - %s call, matched %d traps", c, len(traps))
+		m.logger.Logf("Mock Clock - %s call, matched %d traps", c, len(traps))
 	}
 	if len(traps) == 0 {
 		return
@@ -265,7 +266,7 @@ func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	m.mu.Lock()
 	if !m.testOver {
-		m.tb.Logf("Mock Clock - Advance(%s)", d)
+		m.logger.Logf("Mock Clock - Advance(%s)", d)
 	}
 	fin := m.cur.Add(d)
 	// nextTime.IsZero implies no events scheduled.
@@ -315,7 +316,7 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
 	m.mu.Lock()
 	if !m.testOver {
-		m.tb.Logf("Mock Clock - Set(%s)", t)
+		m.logger.Logf("Mock Clock - Set(%s)", t)
 	}
 	if t.Before(m.cur) {
 		defer close(w.ch)
@@ -354,7 +355,7 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 	m.mu.Lock()
 	if !m.testOver {
-		m.tb.Logf("Mock Clock - AdvanceNext()")
+		m.logger.Logf("Mock Clock - AdvanceNext()")
 	}
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
@@ -445,7 +446,7 @@ func (m *Mock) newTrap(fn clockFunction, tags []string) *Trap {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.testOver {
-		m.tb.Logf("Mock Clock - Trap %s(..., %v)", fn, tags)
+		m.logger.Logf("Mock Clock - Trap %s(..., %v)", fn, tags)
 	}
 	tr := &Trap{
 		fn:    fn,
@@ -458,6 +459,18 @@ func (m *Mock) newTrap(fn clockFunction, tags []string) *Trap {
 	return tr
 }
 
+// WithLogger replaces the default testing logger with a custom one.
+//
+// This can be used to discard log messages with:
+//
+//	quartz.NewMock(t).WithLogger(quartz.NoOpLogger)
+func (m *Mock) WithLogger(l Logger) *Mock {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logger = l
+	return m
+}
+
 // NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
 // You may re-set the time earlier than this, but only before timers or tickers
 // are created.
@@ -467,14 +480,15 @@ func NewMock(tb testing.TB) *Mock {
 		panic(err)
 	}
 	m := &Mock{
-		tb:  tb,
-		cur: cur,
+		tb:     tb,
+		logger: tb,
+		cur:    cur,
 	}
 	tb.Cleanup(func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.testOver = true
-		tb.Logf("Mock Clock - test cleanup; will no longer log clock events")
+		m.logger.Logf("Mock Clock - test cleanup; will no longer log clock events")
 	})
 	return m
 }
@@ -806,3 +820,16 @@ func (t *Trap) MustWait(ctx context.Context) *Call {
 	}
 	return c
 }
+
+type Logger interface {
+	Log(args ...any)
+	Logf(format string, args ...any)
+}
+
+// NoOpLogger is a Logger that discards all log messages.
+var NoOpLogger Logger = noOpLogger{}
+
+type noOpLogger struct{}
+
+func (noOpLogger) Log(args ...any)                 {}
+func (noOpLogger) Logf(format string, args ...any) {}

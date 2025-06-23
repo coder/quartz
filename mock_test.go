@@ -3,6 +3,7 @@ package quartz_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -407,6 +408,39 @@ func Test_UnreleasedCalls(t *testing.T) {
 	})
 }
 
+func Test_WithLogger(t *testing.T) {
+	t.Parallel()
+
+	tl := &testLogger{}
+	mClock := quartz.NewMock(t).WithLogger(tl)
+	mClock.Now("test", "Test_WithLogger")
+	if len(tl.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(tl.calls))
+	}
+	expectLogLine := "Mock Clock - Now([test Test_WithLogger]) call, matched 0 traps"
+	if tl.calls[0] != expectLogLine {
+		t.Fatalf("expected log line %q, got %q", expectLogLine, tl.calls[0])
+	}
+
+	mClock.NewTimer(time.Second, "timer")
+	if len(tl.calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(tl.calls))
+	}
+	expectLogLine = "Mock Clock - NewTimer(1s, [timer]) call, matched 0 traps"
+	if tl.calls[1] != expectLogLine {
+		t.Fatalf("expected log line %q, got %q", expectLogLine, tl.calls[1])
+	}
+
+	mClock.Advance(500 * time.Millisecond)
+	if len(tl.calls) != 3 {
+		t.Fatalf("expected 3 calls, got %d", len(tl.calls))
+	}
+	expectLogLine = "Mock Clock - Advance(500ms)"
+	if tl.calls[2] != expectLogLine {
+		t.Fatalf("expected log line %q, got %q", expectLogLine, tl.calls[2])
+	}
+}
+
 type captureFailTB struct {
 	failed bool
 	testing.TB
@@ -454,4 +488,16 @@ func tRunFail(t testing.TB, f func(t testing.TB)) {
 	if !tb.Failed() {
 		t.Fatal("want test to fail")
 	}
+}
+
+type testLogger struct {
+	calls []string
+}
+
+func (l *testLogger) Log(args ...any) {
+	l.calls = append(l.calls, fmt.Sprint(args...))
+}
+
+func (l *testLogger) Logf(format string, args ...any) {
+	l.calls = append(l.calls, fmt.Sprintf(format, args...))
 }
