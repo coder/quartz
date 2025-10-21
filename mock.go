@@ -64,8 +64,8 @@ func (m *Mock) NewTicker(d time.Duration, tags ...string) *Ticker {
 	c := newCall(clockFunctionNewTicker, tags, withDuration(d))
 	m.matchCallLocked(c)
 	defer close(c.complete)
-	// 1 element buffer follows standard library implementation
-	ticks := make(chan time.Time, 1)
+	// no buffer follows Go 1.23+ behavior
+	ticks := make(chan time.Time)
 	t := &Ticker{
 		C:    ticks,
 		c:    ticks,
@@ -83,7 +83,7 @@ func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
 	c := newCall(clockFunctionNewTimer, tags, withDuration(d))
 	defer close(c.complete)
 	m.matchCallLocked(c)
-	ch := make(chan time.Time, 1)
+	ch := make(chan time.Time)
 	t := &Timer{
 		C:    ch,
 		c:    ch,
@@ -277,8 +277,8 @@ func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 		return w
 	}
 	if fin.After(m.nextTime) {
-		m.tb.Errorf(fmt.Sprintf("cannot advance %s which is beyond next timer/ticker event in %s",
-			d.String(), m.nextTime.Sub(m.cur)))
+		m.tb.Errorf("cannot advance %s which is beyond next timer/ticker event in %s",
+			d.String(), m.nextTime.Sub(m.cur))
 		m.mu.Unlock()
 		close(w.ch)
 		return w

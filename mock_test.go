@@ -110,8 +110,8 @@ func TestNewTicker(t *testing.T) {
 		mClock.Advance(time.Hour).MustWait(ctx)
 	}
 
-	// should get first tick, rest dropped
-	tTime := start.Add(time.Hour)
+	// should get last tick, rest dropped. Note this deviates from the std library.
+	tTime := start.Add(3 * time.Hour)
 	select {
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for ticker")
@@ -380,9 +380,8 @@ func Test_MultipleTrapsDeadlock(t *testing.T) {
 		trap1 := mClock.Trap().Now("1")
 		defer trap1.Close()
 
-		timeCh := make(chan time.Time)
 		go func() {
-			timeCh <- mClock.Now("0", "1")
+			mClock.Now("0", "1")
 		}()
 
 		c0 := trap0.MustWait(testCtx)
@@ -500,4 +499,77 @@ func (l *testLogger) Log(args ...any) {
 
 func (l *testLogger) Logf(format string, args ...any) {
 	l.calls = append(l.calls, fmt.Sprintf(format, args...))
+}
+
+func TestTimerStop_Go123(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mClock := quartz.NewMock(t)
+
+	tmr := mClock.NewTimer(1 * time.Second)
+	mClock.Advance(1 * time.Second).MustWait(ctx)
+	if tmr.Stop() {
+		t.Fatal("timer hadn't already been active")
+	}
+
+	select {
+	case tme := <-tmr.C:
+		t.Fatalf("got channel read after stop: %s", tme)
+	default:
+		// OK!
+	}
+}
+
+func TestTimerReset_Go123(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mClock := quartz.NewMock(t)
+
+	tmr := mClock.NewTimer(1 * time.Second)
+	mClock.Advance(1 * time.Second).MustWait(ctx)
+	if tmr.Reset(1 * time.Second) {
+		t.Fatal("timer hadn't already been active")
+	}
+
+	select {
+	case tme := <-tmr.C:
+		t.Fatalf("got channel read after stop: %s", tme)
+	default:
+		// OK!
+	}
+}
+
+func TestNoLeak_Go123(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mClock := quartz.NewMock(t)
+
+	_ = mClock.NewTimer(1 * time.Second)
+	_ = mClock.NewTicker(1 * time.Second)
+	mClock.Advance(1 * time.Second).MustWait(ctx)
+}
+
+func TestTickerStop_Go123(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mClock := quartz.NewMock(t)
+
+	tkr := mClock.NewTicker(1 * time.Second)
+	mClock.Advance(1 * time.Second).MustWait(ctx)
+	tkr.Stop()
+
+	select {
+	case tme := <-tkr.C:
+		t.Fatalf("got channel read after stop: %s", tme)
+	default:
+		// OK!
+	}
 }

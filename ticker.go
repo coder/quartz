@@ -12,6 +12,18 @@ type Ticker struct {
 	nxt     time.Time     // next tick time
 	mock    *Mock         // mock clock, if set
 	stopped bool          // true if the ticker is not running
+
+	// As of Go 1.23, ticker channels are unbuffered and guaranteed to block forever after a call to stop.
+	//
+	// When a mocked ticker fires, we don't want to block on a channel write, because it's fine for the code under test
+	// not to be reading. That means we need to start a new goroutine to do the channel write if we are a channel-based
+	// ticker.
+	//
+	// They also are not supposed to leak even if they are never read or stopped (Go runtime can garbage collect them).
+	// We can't garbage-collect because we can't check if any other code besides the mock references, but we can ensure
+	// that we don't leak goroutines so that the garbage collector can do its job when the mock is no longer
+	// referenced. The channels below allow us to interrupt the channel write goroutine.
+	interrupt chan struct{}
 }
 
 func (t *Ticker) fire(tt time.Time) {
@@ -24,10 +36,27 @@ func (t *Ticker) fire(tt time.Time) {
 		t.nxt = t.nxt.Add(t.d)
 	}
 	t.mock.recomputeNextLocked()
-	select {
-	case t.c <- tt:
-	default:
+	interrupt := make(chan struct{})
+	// Prevents the goroutine from leaking beyond the test. Side effect is that ticker channels cannot be read
+	// after the test exits.
+	t.mock.tb.Cleanup(func() {
+		<-interrupt
+	})
+	if t.interrupt != nil {
+		// Interrupt previous tick.
+		// TODO: this results in a slight deviation from the Go std library. In a real ticker, if you don't read
+		// for several ticks, you get the first time and the rest are dropped. In this implementation, you will get
+		// the last time.
+		<-t.interrupt
 	}
+	t.interrupt = interrupt
+	go func() {
+		defer close(interrupt)
+		select {
+		case t.c <- tt:
+		case interrupt <- struct{}{}:
+		}
+	}()
 }
 
 func (t *Ticker) next() time.Time {
@@ -49,6 +78,11 @@ func (t *Ticker) Stop(tags ...string) {
 	defer close(c.complete)
 	t.mock.removeEventLocked(t)
 	t.stopped = true
+	// check if we've already fired, and if so, interrupt it.
+	if t.interrupt != nil {
+		<-t.interrupt
+		t.interrupt = nil
+	}
 }
 
 // Reset stops a ticker and resets its period to the specified duration. The
