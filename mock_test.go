@@ -110,8 +110,8 @@ func TestNewTicker(t *testing.T) {
 		mClock.Advance(time.Hour).MustWait(ctx)
 	}
 
-	// should get last tick, rest dropped. Note this deviates from the std library.
-	tTime := start.Add(3 * time.Hour)
+	// should get first tick, rest dropped
+	tTime := start.Add(time.Hour)
 	select {
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for ticker")

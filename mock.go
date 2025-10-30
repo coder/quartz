@@ -55,6 +55,9 @@ func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, 
 	return t
 }
 
+// NewTicker creates a mocked ticker attached to this Mock. Note that it will cease sending ticks on its channel at the
+// end of the test, to avoid leaking any goroutines. Ticks are suppressed even if the mock clock is advanced after the
+// test completes. Best practice is to only manipulate the mock time in the main goroutine of the test.
 func (m *Mock) NewTicker(d time.Duration, tags ...string) *Ticker {
 	if d <= 0 {
 		panic("NewTicker called with negative or zero duration")
@@ -64,17 +67,7 @@ func (m *Mock) NewTicker(d time.Duration, tags ...string) *Ticker {
 	c := newCall(clockFunctionNewTicker, tags, withDuration(d))
 	m.matchCallLocked(c)
 	defer close(c.complete)
-	// no buffer follows Go 1.23+ behavior
-	ticks := make(chan time.Time)
-	t := &Ticker{
-		C:    ticks,
-		c:    ticks,
-		d:    d,
-		nxt:  m.cur.Add(d),
-		mock: m,
-	}
-	m.addEventLocked(t)
-	return t
+	return newMockTickerLocked(m, d)
 }
 
 func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
