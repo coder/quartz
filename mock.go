@@ -761,6 +761,11 @@ func (t *Trap) matches(c *apiCall) bool {
 func (t *Trap) Close() {
 	t.mock.mu.Lock()
 	defer t.mock.mu.Unlock()
+	select {
+	case <-t.done:
+		return // already closed
+	default:
+	}
 	if t.unreleasedCalls != 0 {
 		t.mock.tb.Helper()
 		t.mock.tb.Errorf("trap Closed() with %d unreleased calls", t.unreleasedCalls)

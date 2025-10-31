@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/coder/quartz"
+	"go.uber.org/goleak"
 )
 
 func TestTimer_NegativeDuration(t *testing.T) {
@@ -403,7 +404,10 @@ func Test_UnreleasedCalls(t *testing.T) {
 			_ = mClock.Now()
 		}()
 
-		trap.MustWait(testCtx) // missing release
+		c := trap.MustWait(testCtx) // missing release
+		trap.Close()                // detect unreleased call and fail
+
+		c.Release(testCtx) // clean up goroutine
 	})
 }
 
@@ -572,4 +576,8 @@ func TestTickerStop_Go123(t *testing.T) {
 	default:
 		// OK!
 	}
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }
