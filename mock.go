@@ -739,7 +739,7 @@ type Trap struct {
 }
 
 func (t *Trap) String() string {
-	return fmt.Sprintf("%s(..., %v)", t.fn.String(), t.tags)
+	return fmt.Sprintf("Trap %s(..., %v)", t.fn.String(), t.tags)
 }
 
 func (t *Trap) catch(c *apiCall) {
@@ -767,13 +767,13 @@ func (t *Trap) Close() {
 	defer t.mock.mu.Unlock()
 	select {
 	case <-t.done:
-		t.mock.tb.Logf("trap %s already Closed()", t)
+		t.mock.tb.Logf("%s already Closed()", t)
 		return // already closed
 	default:
 	}
 	if t.unreleasedCalls != 0 {
 		t.mock.tb.Helper()
-		t.mock.tb.Errorf("trap %s Closed() with %d unreleased calls", t, t.unreleasedCalls)
+		t.mock.tb.Errorf("%s Closed() with %d unreleased calls", t, t.unreleasedCalls)
 	}
 	for i, tr := range t.mock.traps {
 		if t == tr {
@@ -819,7 +819,7 @@ func (t *Trap) MustWait(ctx context.Context) *Call {
 	t.mock.tb.Helper()
 	c, err := t.Wait(ctx)
 	if err != nil {
-		t.mock.tb.Fatalf("context expired while waiting for trap %s: %s", t, err.Error())
+		t.mock.tb.Fatalf("context expired while waiting for %s: %s", t, err.Error())
 	}
 	return c
 }
