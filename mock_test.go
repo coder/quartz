@@ -550,6 +550,47 @@ func TestTimerReset_Go123(t *testing.T) {
 	}
 }
 
+// TestTimerReset_NegativeDuration verifies that resetting a still-active timer
+// to a non-positive duration clears its old schedule from the mock
+// synchronously. Otherwise, subsequent Advance/Peek calls race with the
+// fire goroutine and may observe the stale schedule (e.g. Advance beyond the
+// old nxt is incorrectly rejected).
+func TestTimerReset_NegativeDuration(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mClock := quartz.NewMock(t)
+	trapReset := mClock.Trap().TimerReset()
+	defer trapReset.Close()
+
+	tmr := mClock.NewTimer(time.Hour)
+
+	results := make(chan bool, 1)
+	go func() {
+		results <- tmr.Reset(-time.Second)
+	}()
+	trapReset.MustWait(ctx).MustRelease(ctx)
+	if !<-results {
+		t.Fatal("Reset should report the timer was active")
+	}
+
+	// The timer's old 1h schedule must not remain in the mock's event list.
+	// If it does, Advance rejects with "cannot advance beyond next
+	// timer/ticker event".
+	if d, ok := mClock.Peek(); ok {
+		t.Fatalf("expected no pending events, got Peek()=%s", d)
+	}
+	mClock.Advance(2 * time.Hour).MustWait(ctx)
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for timer")
+	case <-tmr.C:
+		// OK
+	}
+}
+
 func TestNoLeak_Go123(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
