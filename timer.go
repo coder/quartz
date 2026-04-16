@@ -103,14 +103,17 @@ func (t *Timer) Reset(d time.Duration, tags ...string) bool {
 		<-t.interrupt
 		t.interrupt = nil
 	}
+	// Remove the timer from the mock's event list synchronously; otherwise the
+	// stale old schedule can cause e.g. Advance() to reject advancing past the
+	// old nxt, even though the timer has been reset.
+	t.mock.removeTimerLocked(t)
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately re-fire
-		// it, rather than remove and re-add it.
+		// it, rather than re-add it.
 		t.stopped = false
 		go t.fire(t.mock.cur)
 		return result
 	}
-	t.mock.removeTimerLocked(t)
 	t.stopped = false
 	t.nxt = t.mock.cur.Add(d)
 	t.mock.addEventLocked(t)
