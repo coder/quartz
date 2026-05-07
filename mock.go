@@ -23,6 +23,10 @@ type TestingT interface {
 	Cleanup(func())
 }
 
+// ErrMockClockTestEnded is used as the cancellation cause when test cleanup
+// cancels a context that was not canceled by its caller.
+var ErrMockClockTestEnded = errors.New("quartz: mock clock test ended")
+
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
 // during a test, triggering any timers or tickers automatically.
 type Mock struct {
@@ -154,6 +158,71 @@ func (m *Mock) Until(t time.Time, tags ...string) time.Duration {
 	return t.Sub(m.cur)
 }
 
+func (m *Mock) WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := newCall(clockFunctionWithDeadline, tags, withTime(d))
+	m.matchCallLocked(c)
+	defer close(c.complete)
+	return m.withDeadlineCauseLocked(parent, d, nil)
+}
+
+func (m *Mock) WithDeadlineCause(parent context.Context, d time.Time, cause error, tags ...string) (context.Context, context.CancelFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := newCall(clockFunctionWithDeadlineCause, tags, withTime(d), withCause(cause))
+	m.matchCallLocked(c)
+	defer close(c.complete)
+	return m.withDeadlineCauseLocked(parent, d, cause)
+}
+
+func (m *Mock) WithTimeout(parent context.Context, d time.Duration, tags ...string) (context.Context, context.CancelFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := newCall(clockFunctionWithTimeout, tags, withDuration(d))
+	m.matchCallLocked(c)
+	defer close(c.complete)
+	deadline := m.cur.Add(d)
+	return m.withDeadlineCauseLocked(parent, deadline, nil)
+}
+
+func (m *Mock) WithTimeoutCause(parent context.Context, d time.Duration, cause error, tags ...string) (context.Context, context.CancelFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := newCall(clockFunctionWithTimeoutCause, tags, withDuration(d), withCause(cause))
+	m.matchCallLocked(c)
+	defer close(c.complete)
+	deadline := m.cur.Add(d)
+	return m.withDeadlineCauseLocked(parent, deadline, cause)
+}
+
+func (m *Mock) withDeadlineCauseLocked(parent context.Context, d time.Time, cause error) (context.Context, context.CancelFunc) {
+	inner, innerCancel := context.WithCancelCause(parent)
+	c := &mockCtx{
+		inner:       inner,
+		innerCancel: innerCancel,
+		deadline:    d,
+		cause:       cause,
+		mock:        m,
+		done:        make(chan struct{}),
+	}
+	if !d.After(m.cur) {
+		// Mirror NewTimer and AfterFunc behavior for past deadlines.
+		go c.fire(m.cur)
+	} else {
+		m.addEventLocked(c)
+	}
+	context.AfterFunc(inner, func() {
+		c.cancelFromInner(inner.Err())
+	})
+	m.tb.Cleanup(func() {
+		c.cancel(context.Canceled, ErrMockClockTestEnded)
+	})
+	return c, func() {
+		c.cancel(context.Canceled, nil)
+	}
+}
+
 func (m *Mock) addEventLocked(e event) {
 	m.all = append(m.all, e)
 	m.recomputeNextLocked()
@@ -186,6 +255,12 @@ func (m *Mock) removeTimer(t *Timer) {
 func (m *Mock) removeTimerLocked(t *Timer) {
 	t.stopped = true
 	m.removeEventLocked(t)
+}
+
+func (m *Mock) removeEvent(e event) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeEventLocked(e)
 }
 
 func (m *Mock) removeEventLocked(e event) {
@@ -444,6 +519,22 @@ func (t Trapper) Until(tags ...string) *Trap {
 	return t.mock.newTrap(clockFunctionUntil, tags)
 }
 
+func (t Trapper) WithDeadline(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithDeadline, tags)
+}
+
+func (t Trapper) WithDeadlineCause(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithDeadlineCause, tags)
+}
+
+func (t Trapper) WithTimeout(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithTimeout, tags)
+}
+
+func (t Trapper) WithTimeoutCause(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithTimeoutCause, tags)
+}
+
 func (m *Mock) Trap() Trapper {
 	return Trapper{m}
 }
@@ -583,6 +674,99 @@ func (m *mockTickerFunc) Wait(tags ...string) error {
 
 var _ Waiter = &mockTickerFunc{}
 
+type mockCtx struct {
+	// inner stores cancellation causes. Value delegates to it so context.Cause
+	// can find the stdlib cancelCtx. Done must return c.done, not inner.Done,
+	// or stdlib descendants attach to inner and inherit its context.Canceled
+	// Err when a mock deadline fires.
+	inner       context.Context
+	innerCancel context.CancelCauseFunc
+	deadline    time.Time
+	cause       error
+
+	mock *Mock
+
+	mu         sync.Mutex // Protects the following fields.
+	err        error
+	done       chan struct{}
+	doneClosed bool
+}
+
+func (c *mockCtx) Deadline() (time.Time, bool) {
+	return c.deadline, true
+}
+
+func (c *mockCtx) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *mockCtx) Value(key any) any {
+	return c.inner.Value(key)
+}
+
+func (c *mockCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.doneClosed {
+		return nil
+	}
+	return c.err
+}
+
+func (c *mockCtx) next() time.Time {
+	return c.deadline
+}
+
+func (c *mockCtx) fire(_ time.Time) {
+	c.cancel(context.DeadlineExceeded, c.cause)
+}
+
+func (c *mockCtx) cancel(err, cause error) {
+	if innerErr := c.inner.Err(); innerErr != nil {
+		c.cancelFromInner(innerErr)
+		return
+	}
+	if cause == nil {
+		cause = err
+	}
+	c.cancelOnce(err, cause, true)
+}
+
+func (c *mockCtx) cancelFromInner(err error) {
+	if err == nil {
+		err = context.Canceled
+	}
+	c.cancelOnce(err, nil, false)
+}
+
+func (c *mockCtx) cancelOnce(err, cause error, cancelInner bool) {
+	c.mu.Lock()
+	if c.err != nil {
+		done := c.done
+		doneClosed := c.doneClosed
+		c.mu.Unlock()
+		if !doneClosed {
+			<-done
+		}
+		return
+	}
+	c.err = err
+	c.mu.Unlock()
+
+	// Remove the scheduled deadline before closing Done, so callers
+	// waiting on Done can observe cancellation without seeing a stale
+	// event in Peek or AdvanceNext.
+	c.mock.removeEvent(c)
+
+	c.mu.Lock()
+	if cancelInner {
+		c.innerCancel(cause)
+	}
+	c.doneClosed = true
+	close(c.done)
+	c.mu.Unlock()
+}
+
 type clockFunction int
 
 const (
@@ -598,6 +782,10 @@ const (
 	clockFunctionNow
 	clockFunctionSince
 	clockFunctionUntil
+	clockFunctionWithDeadline
+	clockFunctionWithDeadlineCause
+	clockFunctionWithTimeout
+	clockFunctionWithTimeoutCause
 )
 
 func (c clockFunction) String() string {
@@ -626,6 +814,14 @@ func (c clockFunction) String() string {
 		return "Since"
 	case clockFunctionUntil:
 		return "Until"
+	case clockFunctionWithDeadline:
+		return "WithDeadline"
+	case clockFunctionWithDeadlineCause:
+		return "WithDeadlineCause"
+	case clockFunctionWithTimeout:
+		return "WithTimeout"
+	case clockFunctionWithTimeoutCause:
+		return "WithTimeoutCause"
 	default:
 		return fmt.Sprintf("Unknown clockFunction(%d)", c)
 	}
@@ -637,6 +833,7 @@ type callArg func(c *apiCall)
 type apiCall struct {
 	Time     time.Time
 	Duration time.Duration
+	Cause    error
 	Tags     []string
 
 	fn       clockFunction
@@ -670,6 +867,14 @@ func (a *apiCall) String() string {
 		return fmt.Sprintf("Since(%s, %v)", a.Time, a.Tags)
 	case clockFunctionUntil:
 		return fmt.Sprintf("Until(%s, %v)", a.Time, a.Tags)
+	case clockFunctionWithDeadline:
+		return fmt.Sprintf("WithDeadline(<ctx>, %s, %v)", a.Time, a.Tags)
+	case clockFunctionWithDeadlineCause:
+		return fmt.Sprintf("WithDeadlineCause(<ctx>, %s, cause=%v, %v)", a.Time, a.Cause, a.Tags)
+	case clockFunctionWithTimeout:
+		return fmt.Sprintf("WithTimeout(<ctx>, %s, %v)", a.Duration, a.Tags)
+	case clockFunctionWithTimeoutCause:
+		return fmt.Sprintf("WithTimeoutCause(<ctx>, %s, cause=%v, %v)", a.Duration, a.Cause, a.Tags)
 	default:
 		return fmt.Sprintf("Unknown clockFunction(%d)", a.fn)
 	}
@@ -679,6 +884,7 @@ func (a *apiCall) String() string {
 type Call struct {
 	Time     time.Time
 	Duration time.Duration
+	Cause    error // Cause passed to a cause variant, if applicable.
 	Tags     []string
 
 	tb      TestingT
@@ -724,6 +930,12 @@ func withTime(t time.Time) callArg {
 func withDuration(d time.Duration) callArg {
 	return func(c *apiCall) {
 		c.Duration = d
+	}
+}
+
+func withCause(err error) callArg {
+	return func(c *apiCall) {
+		c.Cause = err
 	}
 }
 
@@ -814,6 +1026,7 @@ func (t *Trap) Wait(ctx context.Context) (*Call, error) {
 		c := &Call{
 			Time:     a.Time,
 			Duration: a.Duration,
+			Cause:    a.Cause,
 			Tags:     a.Tags,
 			apiCall:  a,
 			trap:     t,
