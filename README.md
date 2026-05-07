@@ -312,6 +312,30 @@ gotBaz := <-baz // ?? never trapped, so races with Advance()
 Tags appear as an optional suffix on all `Clock` methods (type `...string`) and are ignored entirely
 by the real clock. They also appear on all methods on returned timers and tickers.
 
+### Contexts
+
+`Clock` provides `WithDeadline`, `WithDeadlineCause`, `WithTimeout`, and `WithTimeoutCause` methods
+that mirror the standard `context` package. With a `*Mock`, deadlines created through the clock
+advance on mock time:
+
+```go
+ctx, cancel := mClock.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+mClock.Advance(30 * time.Second).MustWait(testCtx)
+if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	t.Fatal("expected deadline exceeded")
+}
+```
+
+Deadlines created through `mClock.WithDeadline` and `mClock.WithTimeout` use mock time. Parent
+contexts keep standard `context` behavior. A parent created with `context.WithDeadline` or
+`context.WithTimeout` can still cancel the child on wall time because Quartz does not convert
+parent deadlines to mock time.
+
+Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
+removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
+
 ## Recommended Patterns
 
 ### Options

@@ -325,6 +325,304 @@ func TestTickerFunc_LongCallback(t *testing.T) {
 	w.MustWait(testCtx)
 }
 
+func TestWithTimeout_FiresOnAdvance(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	ctx, cancel := mClock.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	child, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+
+	mClock.Advance(time.Second).MustWait(testCtx)
+
+	select {
+	case <-ctx.Done():
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for context deadline")
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
+	}
+	select {
+	case <-child.Done():
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for child context")
+	}
+	if !errors.Is(child.Err(), context.DeadlineExceeded) {
+		t.Fatalf("expected child DeadlineExceeded, got %v", child.Err())
+	}
+}
+
+func TestWithDeadline_Deadline(t *testing.T) {
+	t.Parallel()
+
+	mClock := quartz.NewMock(t)
+	deadline := mClock.Now().Add(time.Hour)
+	ctx, cancel := mClock.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	got, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline")
+	}
+	if !got.Equal(deadline) {
+		t.Fatalf("expected deadline %s, got %s", deadline, got)
+	}
+}
+
+func TestWithTimeout_CancelIsIdempotentAndRemovesEvent(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+
+	cancel()
+	cancel()
+	select {
+	case <-ctx.Done():
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for canceled context")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("expected Canceled, got %v", ctx.Err())
+	}
+	if d, ok := mClock.Peek(); ok {
+		t.Fatalf("expected no pending events, got Peek()=%s", d)
+	}
+	mClock.Advance(2 * time.Hour).MustWait(testCtx)
+}
+
+func TestWithTimeout_ParentCanceled(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	parent, parentCancel := context.WithCancel(context.Background())
+	ctx, cancel := mClock.WithTimeout(parent, time.Hour)
+	defer cancel()
+
+	parentCancel()
+	select {
+	case <-ctx.Done():
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for parent cancellation")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("expected Canceled, got %v", ctx.Err())
+	}
+	if d, ok := mClock.Peek(); ok {
+		t.Fatalf("expected no pending events, got Peek()=%s", d)
+	}
+}
+
+func TestWithTimeout_ParentDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	parent, parentCancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer parentCancel()
+	ctx, cancel := mClock.WithTimeout(parent, time.Hour)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		// A wall-clock parent deadline must still cancel mock-clock children.
+		// This keeps test timeout guards effective when mock time is stalled.
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for parent deadline")
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
+	}
+	if d, ok := mClock.Peek(); ok {
+		t.Fatalf("expected no pending events, got Peek()=%s", d)
+	}
+}
+
+func TestWithTimeoutCause_Cause(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	expectedErr := errors.New("deadline cause")
+	ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, expectedErr)
+	defer cancel()
+	child, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+
+	mClock.Advance(time.Second).MustWait(testCtx)
+
+	select {
+	case <-child.Done():
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for child context")
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
+	}
+	if !errors.Is(context.Cause(ctx), expectedErr) {
+		t.Fatalf("expected cause %v, got %v", expectedErr, context.Cause(ctx))
+	}
+	if !errors.Is(context.Cause(child), expectedErr) {
+		t.Fatalf("expected child cause %v, got %v", expectedErr, context.Cause(child))
+	}
+}
+
+func TestWithTimeout_PastDeadline(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	for _, d := range []time.Duration{0, -time.Second} {
+		t.Run(d.String(), func(t *testing.T) {
+			mClock := quartz.NewMock(t)
+			ctx, cancel := mClock.WithTimeout(context.Background(), d)
+			defer cancel()
+
+			select {
+			case <-ctx.Done():
+				// OK
+			case <-testCtx.Done():
+				t.Fatal("timeout waiting for past deadline")
+			}
+			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
+			}
+			if d, ok := mClock.Peek(); ok {
+				t.Fatalf("expected no pending events, got Peek()=%s", d)
+			}
+		})
+	}
+}
+
+func TestWithTimeout_CancelRace(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	parent, parentCancel := context.WithCancel(context.Background())
+	defer parentCancel()
+	ctx, cancel := mClock.WithTimeout(parent, time.Second)
+	defer cancel()
+	child, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	start := make(chan struct{})
+	done := make(chan struct{}, 4)
+
+	go func() {
+		<-start
+		mClock.Advance(time.Second).MustWait(testCtx)
+		done <- struct{}{}
+	}()
+	go func() {
+		<-start
+		cancel()
+		done <- struct{}{}
+	}()
+	go func() {
+		<-start
+		parentCancel()
+		done <- struct{}{}
+	}()
+	go func() {
+		<-start
+		for {
+			select {
+			case <-ctx.Done():
+				_ = ctx.Err()
+				_ = child.Err()
+				done <- struct{}{}
+				return
+			default:
+				_ = ctx.Err()
+				_ = child.Err()
+			}
+		}
+	}()
+
+	close(start)
+	for range 4 {
+		select {
+		case <-done:
+		case <-testCtx.Done():
+			t.Fatal("timeout waiting for cancel race")
+		}
+	}
+}
+
+func TestWithTimeout_Trap(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	trap := mClock.Trap().WithTimeout("ctx")
+	defer trap.Close()
+	ctxs := make(chan context.Context, 1)
+	cancels := make(chan context.CancelFunc, 1)
+	go func() {
+		ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour, "ctx")
+		ctxs <- ctx
+		cancels <- cancel
+	}()
+
+	call := trap.MustWait(testCtx)
+	if call.Duration != time.Hour {
+		t.Fatalf("expected time.Hour, got %v", call.Duration)
+	}
+	call.MustRelease(testCtx)
+	ctx := <-ctxs
+	cancel := <-cancels
+	defer cancel()
+	mClock.Advance(time.Hour).MustWait(testCtx)
+	select {
+	case <-ctx.Done():
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for trapped context")
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
+	}
+
+	causeErr := errors.New("trap cause")
+	trapCause := mClock.Trap().WithTimeoutCause("cause")
+	defer trapCause.Close()
+	go func() {
+		ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Minute, causeErr, "cause")
+		ctxs <- ctx
+		cancels <- cancel
+	}()
+
+	call = trapCause.MustWait(testCtx)
+	if call.Duration != time.Minute {
+		t.Fatalf("expected time.Minute, got %v", call.Duration)
+	}
+	if !errors.Is(call.Cause, causeErr) {
+		t.Fatalf("expected cause %v, got %v", causeErr, call.Cause)
+	}
+	call.MustRelease(testCtx)
+	ctx = <-ctxs
+	cancel = <-cancels
+	cancel()
+	<-ctx.Done()
+}
+
 func Test_MultipleTraps(t *testing.T) {
 	t.Parallel()
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
