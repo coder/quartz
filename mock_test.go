@@ -586,8 +586,18 @@ func TestWithTimeout_Trap(t *testing.T) {
 		t.Fatalf("expected time.Hour, got %v", call.Duration)
 	}
 	call.MustRelease(testCtx)
-	ctx := <-ctxs
-	cancel := <-cancels
+	var ctx context.Context
+	select {
+	case ctx = <-ctxs:
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for trapped WithTimeout context")
+	}
+	var cancel context.CancelFunc
+	select {
+	case cancel = <-cancels:
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for trapped WithTimeout cancel")
+	}
 	defer cancel()
 	mClock.Advance(time.Hour).MustWait(testCtx)
 	select {
@@ -617,10 +627,22 @@ func TestWithTimeout_Trap(t *testing.T) {
 		t.Fatalf("expected cause %v, got %v", causeErr, call.Cause)
 	}
 	call.MustRelease(testCtx)
-	ctx = <-ctxs
-	cancel = <-cancels
+	select {
+	case ctx = <-ctxs:
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for trapped WithTimeoutCause context")
+	}
+	select {
+	case cancel = <-cancels:
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for trapped WithTimeoutCause cancel")
+	}
 	cancel()
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for canceled WithTimeoutCause ctx")
+	}
 }
 
 func Test_MultipleTraps(t *testing.T) {

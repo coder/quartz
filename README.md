@@ -336,6 +336,15 @@ parent deadlines to mock time.
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
 
+#### Caveat: `Deadline()` returns mock time
+
+`ctx.Deadline()` on a mock-clock context returns mock time. Code that compares it against
+`time.Now()` treats it as wall time and will misbehave. The `net/http` client does this in
+`timeBeforeContextDeadline` to decide whether to apply per-request timeouts.
+
+Keep the mock-clock context inside the code under test. Pass a real-clock context across
+package boundaries where Quartz's mocking is not intended.
+
 ## Recommended Patterns
 
 ### Options

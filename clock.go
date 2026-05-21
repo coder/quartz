@@ -42,6 +42,10 @@ type Clock interface {
 	// time, so a parent created with context.WithDeadline or context.WithTimeout can cancel the
 	// child independently of this Clock. The returned cancel function is idempotent and must be
 	// called.
+	//
+	// With a Mock clock, ctx.Deadline() returns mock time. Code that compares it against
+	// time.Now() treats it as wall time and will misbehave. The net/http client does this in
+	// timeBeforeContextDeadline to decide whether to apply per-request timeouts.
 	WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc)
 
 	// WithDeadlineCause returns a copy of parent with a deadline governed by this Clock and

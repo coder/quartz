@@ -207,19 +207,26 @@ func (m *Mock) withDeadlineCauseLocked(parent context.Context, d time.Time, caus
 		done:        make(chan struct{}),
 	}
 	if !d.After(m.cur) {
-		// Mirror NewTimer and AfterFunc behavior for past deadlines.
+		// Past deadline: fire immediately, as NewTimer() does with d <= 0.
 		go c.fire(m.cur)
 	} else {
 		m.addEventLocked(c)
 	}
 	context.AfterFunc(inner, func() {
-		c.cancelFromInner(inner.Err())
+		// inner.Err() is non-nil per AfterFunc() contract.
+		c.mock.mu.Lock()
+		defer c.mock.mu.Unlock()
+		c.cancelLocked(inner.Err(), nil)
 	})
 	m.tb.Cleanup(func() {
-		c.cancel(context.Canceled, ErrMockClockTestEnded)
+		c.mock.mu.Lock()
+		defer c.mock.mu.Unlock()
+		c.cancelLocked(context.Canceled, ErrMockClockTestEnded)
 	})
 	return c, func() {
-		c.cancel(context.Canceled, nil)
+		c.mock.mu.Lock()
+		defer c.mock.mu.Unlock()
+		c.cancelLocked(context.Canceled, nil)
 	}
 }
 
@@ -255,12 +262,6 @@ func (m *Mock) removeTimer(t *Timer) {
 func (m *Mock) removeTimerLocked(t *Timer) {
 	t.stopped = true
 	m.removeEventLocked(t)
-}
-
-func (m *Mock) removeEvent(e event) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.removeEventLocked(e)
 }
 
 func (m *Mock) removeEventLocked(e event) {
@@ -675,21 +676,23 @@ func (m *mockTickerFunc) Wait(tags ...string) error {
 var _ Waiter = &mockTickerFunc{}
 
 type mockCtx struct {
-	// inner stores cancellation causes. Value delegates to it so context.Cause
-	// can find the stdlib cancelCtx. Done must return c.done, not inner.Done,
-	// or stdlib descendants attach to inner and inherit its context.Canceled
-	// Err when a mock deadline fires.
+	mock *Mock
+
+	// inner stores the cancellation cause so context.Cause() can find it via
+	// Value(&cancelCtxKey). Done() must NOT return inner.Done(): stdlib's
+	// parentCancelCtx fast-path would then attach descendants directly to
+	// inner, and they would read inner's context.Canceled Err() on deadline
+	// fire instead of ours.
 	inner       context.Context
 	innerCancel context.CancelCauseFunc
 	deadline    time.Time
-	cause       error
 
-	mock *Mock
+	// Cause recorded when the deadline fires.
+	cause error
 
-	mu         sync.Mutex // Protects the following fields.
-	err        error
-	done       chan struct{}
-	doneClosed bool
+	// err and done are written together under mock.mu.
+	err  error
+	done chan struct{}
 }
 
 func (c *mockCtx) Deadline() (time.Time, bool) {
@@ -705,11 +708,8 @@ func (c *mockCtx) Value(key any) any {
 }
 
 func (c *mockCtx) Err() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.doneClosed {
-		return nil
-	}
+	c.mock.mu.Lock()
+	defer c.mock.mu.Unlock()
 	return c.err
 }
 
@@ -718,53 +718,25 @@ func (c *mockCtx) next() time.Time {
 }
 
 func (c *mockCtx) fire(_ time.Time) {
-	c.cancel(context.DeadlineExceeded, c.cause)
+	c.mock.mu.Lock()
+	defer c.mock.mu.Unlock()
+	c.cancelLocked(context.DeadlineExceeded, c.cause)
 }
 
-func (c *mockCtx) cancel(err, cause error) {
-	if innerErr := c.inner.Err(); innerErr != nil {
-		c.cancelFromInner(innerErr)
+// cancelLocked matches stdlib cancelCtx.cancel(): a nil cause defaults to err.
+//
+// Must be called with mock.mu held.
+func (c *mockCtx) cancelLocked(err, cause error) {
+	if c.err != nil {
 		return
 	}
 	if cause == nil {
 		cause = err
 	}
-	c.cancelOnce(err, cause, true)
-}
-
-func (c *mockCtx) cancelFromInner(err error) {
-	if err == nil {
-		err = context.Canceled
-	}
-	c.cancelOnce(err, nil, false)
-}
-
-func (c *mockCtx) cancelOnce(err, cause error, cancelInner bool) {
-	c.mu.Lock()
-	if c.err != nil {
-		done := c.done
-		doneClosed := c.doneClosed
-		c.mu.Unlock()
-		if !doneClosed {
-			<-done
-		}
-		return
-	}
 	c.err = err
-	c.mu.Unlock()
-
-	// Remove the scheduled deadline before closing Done, so callers
-	// waiting on Done can observe cancellation without seeing a stale
-	// event in Peek or AdvanceNext.
-	c.mock.removeEvent(c)
-
-	c.mu.Lock()
-	if cancelInner {
-		c.innerCancel(cause)
-	}
-	c.doneClosed = true
+	c.mock.removeEventLocked(c)
+	c.innerCancel(cause)
 	close(c.done)
-	c.mu.Unlock()
 }
 
 type clockFunction int
