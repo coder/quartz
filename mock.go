@@ -209,8 +209,6 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	close(call.complete)
 	m.mu.Unlock()
 
-	// Outside m.mu: cancel() calls parent.Err(), which takes m.mu when parent is a context from
-	// this Mock.
 	if pastDeadline {
 		c.cancel(context.DeadlineExceeded, cause)
 	} else {
@@ -704,10 +702,9 @@ type mockCtx struct {
 	mock   *Mock
 	parent context.Context
 
-	// inner stores the cancellation cause so context.Cause() can find it via
-	// Value(&cancelCtxKey). Done() must NOT return inner.Done(): stdlib's
-	// parentCancelCtx fast-path would then attach descendants directly to
-	// inner, and they would read inner's context.Canceled Err() on deadline
+	// inner stores the cancellation cause so context.Cause() can find it via Value(&cancelCtxKey).
+	// Done() must NOT return inner.Done(): stdlib's parentCancelCtx fast-path would then attach
+	// descendants directly to inner, and they would read inner's context.Canceled Err() on deadline
 	// fire instead of ours.
 	inner       context.Context
 	innerCancel context.CancelCauseFunc
@@ -727,6 +724,7 @@ type mockCtx struct {
 	stopParent func() bool
 }
 
+// afterFunc gives each registration a pointer identity for stop to find; funcs are not comparable.
 type afterFunc struct{ f func() }
 
 // noWallDeadline is what Deadline() reports for a mock context whose parent has no deadline.
@@ -741,9 +739,9 @@ var noWallDeadline = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 // AfterFunc lets stdlib contexts created directly from c register for cancellation instead of each
 // starting a goroutine that waits on Done (see context.afterFuncer). Registered functions run
-// before fire or the cancel function returns, so those contexts are done by the time
-// Advance().MustWait() or cancel() returns. Contexts derived through another layer, such as
-// context.WithValue, still use a goroutine because the context package does not forward AfterFunc.
+// before the call that cancels c returns, so those contexts are done by the time cancel() or
+// Advance().MustWait() returns. Contexts derived through another layer, such as context.WithValue,
+// still use a goroutine because the context package does not forward AfterFunc.
 func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
 	c.mock.mu.Lock()
 	defer c.mock.mu.Unlock()
@@ -771,10 +769,11 @@ func (c *mockCtx) Deadline() (time.Time, bool) {
 	return c.wallDeadline, true
 }
 
-// Done, Err, and Value check the parent first because context.AfterFunc reports parent cancellation
-// asynchronously, and stdlib contexts are done as soon as their parent is. Value is included
-// because context.Cause reads the cause through it. A Done channel obtained before the parent was
-// canceled closes when the context.AfterFunc goroutine runs.
+// Done, Err, and Value check the parent first because stdlib contexts are done as soon as their
+// parent is, but c may be notified from a goroutine: always when the parent is not a mock context,
+// and when a mock parent was canceled before c registered with it. Value is included because
+// context.Cause reads the cause through it. A Done channel obtained before the parent was canceled
+// closes when that goroutine runs.
 func (c *mockCtx) Done() <-chan struct{} {
 	c.checkParent()
 	return c.done
@@ -810,8 +809,8 @@ func (c *mockCtx) checkParent() {
 // cancel matches stdlib cancelCtx.cancel(): a nil cause defaults to err. If the parent is already
 // done, its error and cause win, as they do when stdlib propagates cancellation.
 //
-// Must be called without mock.mu held, because parent.Err() takes mock.mu when parent is a context
-// from this Mock.
+// cancel takes mock.mu. It reads the parent's error and cause before that, because parent.Err()
+// also takes mock.mu when parent is a context from this Mock.
 func (c *mockCtx) cancel(err, cause error) {
 	if perr := c.parent.Err(); perr != nil {
 		err, cause = perr, context.Cause(c.parent)

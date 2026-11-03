@@ -554,8 +554,8 @@ func TestWithTimeout_ParentDeadlineExceeded(t *testing.T) {
 
 	select {
 	case <-ctx.Done():
-		// A wall-clock parent deadline must still cancel mock-clock children.
-		// This keeps test timeout guards effective when mock time is stalled.
+		// A wall-clock parent deadline must still cancel mock-clock children. This keeps test
+		// timeout guards effective when mock time is stalled.
 	case <-testCtx.Done():
 		t.Fatal("timeout waiting for parent deadline")
 	}
