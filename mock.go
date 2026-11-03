@@ -211,8 +211,6 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 
 	if pastDeadline {
 		c.cancel(context.DeadlineExceeded, cause)
-	} else {
-		c.checkParent()
 	}
 	var stop func() bool
 	if p, ok := parent.(*mockCtx); ok {
