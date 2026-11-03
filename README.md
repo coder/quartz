@@ -443,8 +443,9 @@ Since Go 1.25, [`synctest.Test`](https://pkg.go.dev/testing/synctest) runs a tes
 whose fake clock moves forward when every goroutine in the bubble is
 [durably blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-dependent code:
 
-- If the test does no real I/O, use `synctest` with `quartz.NewReal()`, which runs on bubble time
-  there. You need no `*Mock`, `Advance()`, or traps.
+- If the test does no real I/O, run it in `synctest.Test` and keep the production
+  `quartz.NewReal()`. Inside a bubble it runs on bubble time, so you need no `*Mock`, `Advance()`,
+  or traps.
 - If the test does real I/O, such as database queries or requests over a real network, use a
   `*Mock` outside a bubble, as in [Mocking](#mocking). Bubble time stops while a goroutine waits on
   I/O. With `go 1.27` or later in `go.mod`, HTTP tests can stay in the bubble with an
