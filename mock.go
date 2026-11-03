@@ -211,7 +211,13 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	} else {
 		c.checkParent()
 	}
-	stop := context.AfterFunc(parent, c.checkParent)
+	var stop func() bool
+	if p, ok := parent.(*mockCtx); ok {
+		// Run synchronously when the parent is canceled, as stdlib children do.
+		stop = p.AfterFunc(c.checkParent)
+	} else {
+		stop = context.AfterFunc(parent, c.checkParent)
+	}
 	c.mock.mu.Lock()
 	c.stopParent = stop
 	done := c.err != nil
@@ -705,10 +711,42 @@ type mockCtx struct {
 	// Cause recorded when the deadline fires.
 	cause error
 
-	// err, done, and stopParent are guarded by mock.mu. err and done are written together.
+	// err, done, afterFuncs, and stopParent are guarded by mock.mu. err and done are written
+	// together.
 	err        error
 	done       chan struct{}
+	afterFuncs []*afterFunc
 	stopParent func() bool
+}
+
+type afterFunc struct{ f func() }
+
+// AfterFunc lets stdlib contexts derived from c register for cancellation instead of each
+// starting a goroutine that waits on Done (see context.afterFuncer). Registered functions run
+// before fire or the cancel function returns, so derived contexts are done by the time
+// Advance().MustWait() or cancel() returns.
+func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
+	c.checkParent()
+	c.mock.mu.Lock()
+	defer c.mock.mu.Unlock()
+	if c.err != nil {
+		// The caller may hold locks that f takes, so f must not run on this goroutine.
+		go f()
+		return func() bool { return false }
+	}
+	a := &afterFunc{f: f}
+	c.afterFuncs = append(c.afterFuncs, a)
+	return func() bool {
+		c.mock.mu.Lock()
+		defer c.mock.mu.Unlock()
+		for i, x := range c.afterFuncs {
+			if x == a {
+				c.afterFuncs = append(c.afterFuncs[:i], c.afterFuncs[i+1:]...)
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func (c *mockCtx) Deadline() (time.Time, bool) {
@@ -770,9 +808,15 @@ func (c *mockCtx) cancel(err, cause error) {
 	c.innerCancel(cause)
 	close(c.done)
 	stop := c.stopParent
+	afterFuncs := c.afterFuncs
+	c.afterFuncs = nil
 	c.mock.mu.Unlock()
 	if stop != nil {
 		stop()
+	}
+	// Without mock.mu: derived contexts call c.Err() while canceling.
+	for _, a := range afterFuncs {
+		a.f()
 	}
 }
 

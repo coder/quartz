@@ -347,14 +347,33 @@ func TestWithTimeout_FiresOnAdvance(t *testing.T) {
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
 	}
-	select {
-	case <-child.Done():
-		// OK
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for child context")
-	}
+	// Derived contexts are done by the time MustWait returns.
 	if !errors.Is(child.Err(), context.DeadlineExceeded) {
 		t.Fatalf("expected child DeadlineExceeded, got %v", child.Err())
+	}
+}
+
+func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
+	t.Parallel()
+
+	mClock := quartz.NewMock(t)
+	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+	child, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	nested, nestedCancel := mClock.WithTimeout(ctx, time.Hour)
+	defer nestedCancel()
+
+	cancel()
+	if !errors.Is(child.Err(), context.Canceled) {
+		t.Fatalf("expected stdlib child Canceled, got %v", child.Err())
+	}
+	select {
+	case <-nested.Done():
+	default:
+		t.Fatal("expected nested mock context Done to be closed")
+	}
+	if d, ok := mClock.Peek(); ok {
+		t.Fatalf("expected no pending events, got Peek()=%s", d)
 	}
 }
 
