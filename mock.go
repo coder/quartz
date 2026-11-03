@@ -30,10 +30,9 @@ type Mock struct {
 	logger   Logger
 	mu       sync.Mutex
 	testOver bool
-	// done is closed by the cleanup registered in NewMock to end timer channel writes that are
-	// waiting for a reader. A reader that is already waiting on C when a write starts still gets
-	// the value, even after done is closed.
-	done chan struct{}
+	// writes holds the timers that have a goroutine sending their fired value on C. The cleanup
+	// registered in NewMock ends those goroutines.
+	writes map[*Timer]struct{}
 
 	// cur is the current time
 	cur time.Time
@@ -493,13 +492,15 @@ func NewMock(tb TestingT) *Mock {
 		tb:     tb,
 		logger: tb,
 		cur:    cur,
-		done:   make(chan struct{}),
+		writes: make(map[*Timer]struct{}),
 	}
 	tb.Cleanup(func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.testOver = true
-		close(m.done)
+		for t := range m.writes {
+			t.endWriteLocked()
+		}
 		m.logger.Logf("Mock Clock - test cleanup; will no longer log clock events")
 	})
 	return m

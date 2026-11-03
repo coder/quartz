@@ -26,8 +26,8 @@ type Timer struct {
 	// They also are not supposed to leak even if they are never read or stopped (Go runtime can
 	// garbage collect them). We can't garbage-collect because we can't check if any other code
 	// besides the mock references, but we can ensure that we don't leak goroutines so that the
-	// garbage collector can do its job when the mock is no longer referenced. interrupt lets Stop
-	// and Reset end the write goroutine; Mock.done ends it when NewMock's cleanup runs.
+	// garbage collector can do its job when the mock is no longer referenced. interrupt lets Stop,
+	// Reset and the cleanup registered by NewMock end the write goroutine.
 	interrupt chan struct{}
 }
 
@@ -38,27 +38,54 @@ func (t *Timer) fire(tt time.Time) {
 		t.mock.mu.Unlock()
 		t.fn()
 		return
+	} else if t.mock.testOver {
+		t.mock.mu.Unlock()
+		// NewMock's cleanup has run and would not end a write goroutine, so only a reader that is
+		// already waiting gets the value.
+		select {
+		case t.c <- tt:
+		default:
+		}
 	} else {
 		interrupt := make(chan struct{})
 		t.interrupt = interrupt
+		t.mock.writes[t] = struct{}{}
 		t.mock.mu.Unlock()
 		go func() {
-			defer close(interrupt)
 			// select picks at random among ready cases. Send first to a reader that is already
-			// waiting, so it gets the value even when done is closed or Stop or Reset is waiting on
+			// waiting, so it gets the value even when Stop, Reset or NewMock's cleanup is waiting on
 			// interrupt.
 			select {
 			case t.c <- tt:
-				return
 			default:
+				select {
+				case t.c <- tt:
+				case interrupt <- struct{}{}:
+					// endWriteLocked received this and removed the write.
+					return
+				}
 			}
-			select {
-			case t.c <- tt:
-			case interrupt <- struct{}{}:
-			case <-t.mock.done:
+			// Close before locking: endWriteLocked waits on interrupt with the lock held.
+			close(interrupt)
+			t.mock.mu.Lock()
+			defer t.mock.mu.Unlock()
+			// Otherwise endWriteLocked has removed this write, and Reset may have started another.
+			if t.interrupt == interrupt {
+				t.interrupt = nil
+				delete(t.mock.writes, t)
 			}
 		}()
 	}
+}
+
+// endWriteLocked ends the goroutine that fire started to send on C, if it has not ended yet.
+func (t *Timer) endWriteLocked() {
+	if t.interrupt == nil {
+		return
+	}
+	<-t.interrupt
+	t.interrupt = nil
+	delete(t.mock.writes, t)
 }
 
 func (t *Timer) next() time.Time {
@@ -82,10 +109,7 @@ func (t *Timer) Stop(tags ...string) bool {
 	result := !t.stopped
 	t.mock.removeTimerLocked(t)
 	// check if we've already fired, and if so, interrupt it.
-	if t.interrupt != nil {
-		<-t.interrupt
-		t.interrupt = nil
-	}
+	t.endWriteLocked()
 	return result
 }
 
@@ -104,10 +128,7 @@ func (t *Timer) Reset(d time.Duration, tags ...string) bool {
 	defer close(c.complete)
 	result := !t.stopped
 	// check if we've already fired, and if so, interrupt it.
-	if t.interrupt != nil {
-		<-t.interrupt
-		t.interrupt = nil
-	}
+	t.endWriteLocked()
 	// Remove the timer from the mock's event list synchronously; otherwise the
 	// stale old schedule can cause e.g. Advance() to reject advancing past the
 	// old nxt, even though the timer has been reset.
