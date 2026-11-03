@@ -691,7 +691,7 @@ type Call struct {
 }
 
 // Release the call and wait for it to complete. If the provided context expires before the call completes, it returns
-// an error.
+// an error. If the call has completed, Release returns nil even if the context has also expired.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
@@ -699,7 +699,12 @@ func (c *Call) Release(ctx context.Context) error {
 	c.apiCall.releases.Done()
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("timed out waiting for release; did more than one trap capture the call?: %w", ctx.Err())
+		// select picks randomly among ready cases; report completion if it also happened.
+		select {
+		case <-c.apiCall.complete:
+		default:
+			return fmt.Errorf("timed out waiting for release; did more than one trap capture the call?: %w", ctx.Err())
+		}
 	case <-c.apiCall.complete:
 		// OK
 	}
@@ -808,26 +813,34 @@ func (t *Trap) callReleased() {
 
 var ErrTrapClosed = errors.New("trap closed")
 
+// Wait for a call to be trapped, or until the context expires or the trap is closed. If a call is
+// ready, Wait returns it even if the context has also expired.
 func (t *Trap) Wait(ctx context.Context) (*Call, error) {
+	var a *apiCall
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		// select picks randomly among ready cases; report a ready call if there is one.
+		select {
+		case a = <-t.calls:
+		default:
+			return nil, ctx.Err()
+		}
 	case <-t.done:
 		return nil, ErrTrapClosed
-	case a := <-t.calls:
-		c := &Call{
-			Time:     a.Time,
-			Duration: a.Duration,
-			Tags:     a.Tags,
-			apiCall:  a,
-			trap:     t,
-			tb:       t.mock.tb,
-		}
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		t.unreleasedCalls++
-		return c, nil
+	case a = <-t.calls:
 	}
+	c := &Call{
+		Time:     a.Time,
+		Duration: a.Duration,
+		Tags:     a.Tags,
+		apiCall:  a,
+		trap:     t,
+		tb:       t.mock.tb,
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.unreleasedCalls++
+	return c, nil
 }
 
 // MustWait calls Wait() and then if there is an error, immediately fails the
