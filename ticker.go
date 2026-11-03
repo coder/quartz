@@ -147,14 +147,6 @@ func newMockTickerLocked(m *Mock, d time.Duration) *Ticker {
 		internalTicks: make(chan time.Time),
 	}
 	m.addEventLocked(t)
-	m.tb.Cleanup(func() {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if t.interrupt != nil {
-			<-t.interrupt
-			t.interrupt = nil
-		}
-	})
 	t.startRunLoopLocked()
 	return t
 }
