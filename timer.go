@@ -17,11 +17,12 @@ type Timer struct {
 	fn      func()      // AfterFunc function, if set
 	stopped bool        // True if stopped, false if running
 
-	// As of Go 1.23, timer channels are unbuffered and guaranteed to block forever after a call to stop.
+	// As of Go 1.23, timer channels are unbuffered and guaranteed to block forever after a call to
+	// stop.
 	//
-	// When a mocked timer fires, we don't want to block on a channel write, because it's fine for the code under test
-	// not to be reading. That means we need to start a new goroutine to do the channel write if we are a channel-based
-	// timer.
+	// When a mocked timer fires, we don't want to block on a channel write, because it's fine for
+	// the code under test not to be reading. That means we need to start a new goroutine to do the
+	// channel write if we are a channel-based timer.
 	//
 	// They also are not supposed to leak even if they are never read or stopped (Go runtime can
 	// garbage collect them). We can't garbage-collect because we can't check if any other code
