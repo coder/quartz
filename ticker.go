@@ -14,11 +14,12 @@ type Ticker struct {
 	stopped       bool           // true if the ticker is not running
 	internalTicks chan time.Time // used to deliver ticks to the runLoop goroutine
 
-	// As of Go 1.23, ticker channels are unbuffered and guaranteed to block forever after a call to stop.
+	// As of Go 1.23, ticker channels are unbuffered and guaranteed to block forever after a call to
+	// stop.
 	//
-	// When a mocked ticker fires, we don't want to block on a channel write, because it's fine for the code under test
-	// not to be reading. That means we need to start a new goroutine to do the channel write (runLoop) if we are a
-	// channel-based ticker.
+	// When a mocked ticker fires, we don't want to block on a channel write, because it's fine for
+	// the code under test not to be reading. That means we need to start a new goroutine to do the
+	// channel write (runLoop) if we are a channel-based ticker.
 	//
 	// They also are not supposed to leak even if they are never read or stopped (Go runtime can
 	// garbage collect them). We can't garbage-collect because we can't check if any other code
