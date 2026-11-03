@@ -32,7 +32,9 @@ type TestingT interface {
 var ErrMockClockTestEnded = errors.New("quartz: mock clock test ended")
 
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
-// during a test, triggering any timers or tickers automatically.
+// during a test, triggering scheduled events automatically. Timers, tickers, and mock contexts are
+// events. A mock context is a context from WithDeadline, WithTimeout, or their Cause variants, and
+// it is scheduled until it expires or is canceled.
 type Mock struct {
 	tb       TestingT
 	logger   Logger
@@ -411,10 +413,10 @@ func (w AdvanceWaiter) Done() <-chan struct{} {
 	return w.ch
 }
 
-// Advance moves the clock forward by d, triggering any timers or tickers.  The returned value can
-// be used to wait for all timers and ticks to complete.  Advance sets the clock forward before
-// returning, and can only advance up to the next timer or tick event. It will fail the test if you
-// attempt to advance beyond.
+// Advance moves the clock forward by d, triggering any events scheduled at that time.  The returned
+// value can be used to wait for the triggered events to complete.  Advance sets the clock forward
+// before returning, and can only advance up to the next scheduled event. It will fail the test if
+// you attempt to advance beyond.
 //
 // If you need to advance exactly to the next event, and don't know or don't wish to calculate it,
 // consider AdvanceNext().
@@ -467,8 +469,8 @@ func (m *Mock) advanceLocked(w AdvanceWaiter) {
 }
 
 // Set the time to t.  If the time is after the current mocked time, then this is equivalent to
-// Advance() with the difference.  You may only Set the time earlier than the current time before
-// starting tickers and timers (e.g. at the start of your test case).
+// Advance() with the difference.  You may only Set the time earlier than the current time while
+// no events are scheduled (e.g. at the start of your test case).
 func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
@@ -509,9 +511,9 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	return w
 }
 
-// AdvanceNext advances the clock to the next timer or tick event.  It fails the test if there are
-// none scheduled.  It returns the duration the clock was advanced and a waiter that can be used to
-// wait for the timer/tick event(s) to finish.
+// AdvanceNext advances the clock to the next scheduled event.  It fails the test if there are none
+// scheduled.  It returns the duration the clock was advanced and a waiter that can be used to wait
+// for the event(s) to finish.
 func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 	m.checkDoneContexts()
 	m.mu.Lock()
@@ -532,9 +534,8 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 	return d, w
 }
 
-// Peek returns the duration until the next ticker or timer event and the value
-// true, or, if there are no running tickers or timers, it returns zero and
-// false.
+// Peek returns the duration until the next scheduled event and the value true, or, if there are
+// no scheduled events, it returns zero and false.
 func (m *Mock) Peek() (d time.Duration, ok bool) {
 	m.checkDoneContexts()
 	m.mu.Lock()
@@ -650,8 +651,8 @@ func (m *Mock) WithLogger(l Logger) *Mock {
 }
 
 // NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
-// You may re-set the time earlier than this, but only before timers or tickers
-// are created.
+// You may re-set the time earlier than this, but only before any events are
+// scheduled.
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {
