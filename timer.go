@@ -23,11 +23,11 @@ type Timer struct {
 	// not to be reading. That means we need to start a new goroutine to do the channel write if we are a channel-based
 	// timer.
 	//
-	// They also are not supposed to leak even if they are never read or stopped (Go runtime can garbage collect them).
-	// We can't garbage-collect because we can't check if any other code besides the mock references, but we can ensure
-	// that we don't leak goroutines so that the garbage collector can do its job when the mock is no longer
-	// referenced. interrupt lets Stop and Reset interrupt the channel write goroutine, and
-	// mock.done interrupts it when the test ends.
+	// They also are not supposed to leak even if they are never read or stopped (Go runtime can
+	// garbage collect them). We can't garbage-collect because we can't check if any other code
+	// besides the mock references, but we can ensure that we don't leak goroutines so that the
+	// garbage collector can do its job when the mock is no longer referenced. interrupt lets Stop
+	// and Reset end the write goroutine; Mock.done ends it when NewMock's cleanup runs.
 	interrupt chan struct{}
 }
 
@@ -39,9 +39,6 @@ func (t *Timer) fire(tt time.Time) {
 		t.fn()
 		return
 	} else {
-		// The cleanup registered by NewMock ends pending timer channel writes, so the write
-		// goroutine does not leak beyond the test. A write already pending when it runs may still
-		// be received by a reader that is waiting at that moment.
 		interrupt := make(chan struct{})
 		t.interrupt = interrupt
 		t.mock.mu.Unlock()
