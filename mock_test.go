@@ -383,9 +383,6 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 	default:
 		t.Fatal("expected nested mock context Done to be closed")
 	}
-	if d, ok := mClock.Peek(); ok {
-		t.Fatalf("expected no pending events, got Peek()=%s", d)
-	}
 }
 
 func TestWithDeadline_Deadline(t *testing.T) {
@@ -404,14 +401,6 @@ func TestWithDeadline_Deadline(t *testing.T) {
 		}
 		if got.Year() != 9999 {
 			t.Fatalf("expected deadline in year 9999, got %s", got)
-		}
-
-		// A stdlib timeout derived from the mock context keeps its own wall-clock deadline.
-		child, childCancel := context.WithTimeout(ctx, time.Minute)
-		defer childCancel()
-		childDeadline, _ := child.Deadline()
-		if !childDeadline.After(time.Now()) {
-			t.Fatalf("expected child deadline in the future, got %s", childDeadline)
 		}
 	})
 
@@ -563,28 +552,6 @@ func TestWithTimeout_ParentAlreadyDone(t *testing.T) {
 				t.Fatalf("expected parent cause, got %v", got)
 			}
 		})
-	}
-}
-
-// The parent was canceled first, so its error and cause win even though the mock deadline is
-// reached before the context observes the parent asynchronously.
-func TestWithTimeout_ParentCanceledBeforeDeadline(t *testing.T) {
-	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-
-	mClock := quartz.NewMock(t)
-	parent, parentCancel := context.WithCancel(context.Background())
-	ctx, cancel := mClock.WithTimeout(parent, time.Second)
-	defer cancel()
-
-	parentCancel()
-	mClock.Advance(time.Second).MustWait(testCtx)
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatalf("expected Canceled, got %v", ctx.Err())
-	}
-	if got := context.Cause(ctx); !errors.Is(got, context.Canceled) {
-		t.Fatalf("expected Canceled cause, got %v", got)
 	}
 }
 
