@@ -494,10 +494,12 @@ synctest.Test(t, func(t *testing.T) {
 ```
 
 The `*Mock` registers cleanup functions on its `t`. Cleanup registered on the bubble's `t` runs
-inside the bubble; cleanup registered on the outer `t` runs outside it. With the outer `t`, a mock
-context left uncanceled, a mock ticker left running, or a fired timer whose channel was never read
-crashes the test binary with `fatal error: close of synctest channel from outside bubble` or
-`fatal error: receive on synctest channel from outside bubble`.
+inside the bubble. Cleanup registered on the outer `t` runs outside the bubble, where it can operate
+on channels created in the bubble and crash the test binary with
+`fatal error: close of synctest channel from outside bubble` or
+`fatal error: receive on synctest channel from outside bubble`. For example, this happens after any
+`NewTimer` fires, even if its channel was read, and for a mock context derived from `t.Context()`,
+even if it was canceled.
 
 A parent created inside a bubble with `context.WithTimeout` or `context.WithDeadline` runs on bubble
 time. If the test blocks on a mock context that it never advances, bubble time advances to the
