@@ -352,12 +352,6 @@ func TestWithTimeout_FiresOnAdvance(t *testing.T) {
 
 	mClock.Advance(time.Second).MustWait(testCtx)
 
-	select {
-	case <-ctx.Done():
-		// OK
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for context deadline")
-	}
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
 	}
@@ -634,12 +628,6 @@ func TestWithTimeoutCause_Cause(t *testing.T) {
 
 	mClock.Advance(time.Second).MustWait(testCtx)
 
-	select {
-	case <-child.Done():
-		// OK
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for child context")
-	}
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
 	}
