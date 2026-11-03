@@ -43,10 +43,10 @@ type Clock interface {
 	// independently of this Clock. The returned cancel function is idempotent and must be called.
 	//
 	// With a Mock clock, Done and Err follow mock time, but ctx.Deadline() reports the parent's
-	// deadline, or a time in year 9999 if the parent has none. Code outside the test compares
-	// Deadline() with wall time, for example in net.Dialer, http.Client, and gRPC, and would treat
-	// a mock deadline as already expired. Code that needs the remaining mock time must compute it
-	// from the deadline or timeout it passed in, not from ctx.Deadline().
+	// deadline, or a time in year 9999 if the parent has none. Libraries such as net.Dialer,
+	// http.Client, and gRPC compare Deadline() with wall time and would treat a mock deadline as
+	// already expired. Code that needs the remaining mock time must compute it from the deadline or
+	// timeout it passed in, not from ctx.Deadline().
 	WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc)
 
 	// WithDeadlineCause is like WithDeadline and records cause when this Clock reaches d.
