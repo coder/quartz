@@ -44,6 +44,14 @@ func (t *Timer) fire(tt time.Time) {
 		t.mock.mu.Unlock()
 		go func() {
 			defer close(interrupt)
+			// select picks at random among ready cases. Send first to a reader that is already
+			// waiting, so it gets the value even when done is closed or Stop or Reset is waiting on
+			// interrupt.
+			select {
+			case t.c <- tt:
+				return
+			default:
+			}
 			select {
 			case t.c <- tt:
 			case interrupt <- struct{}{}:
