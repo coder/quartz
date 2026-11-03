@@ -320,7 +320,7 @@ func (m *Mock) removeEventLocked(e event) {
 	defer m.recomputeNextLocked()
 	for i := range m.all {
 		if m.all[i] == e {
-			// slices.Delete zeroes the vacated slot, so the backing array does not keep e reachable.
+			// slices.Delete zeroes the vacated slot, so the backing array stops referencing e.
 			m.all = slices.Delete(m.all, i, i+1)
 			return
 		}
