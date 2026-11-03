@@ -788,21 +788,50 @@ func TestNoLeak_Go123(t *testing.T) {
 		}
 	})
 
-	t.Run("TickerResetAfterTestEnds", func(t *testing.T) {
+	// Code that outlives a test can start or reset a ticker after the test's cleanups have run.
+	t.Run("TickerStartedAfterTestEnds", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		for _, tc := range []struct {
+			name  string
+			inner func(*quartz.Mock) *quartz.Ticker
+			after func(*quartz.Mock, *quartz.Ticker)
+		}{
+			{
+				name: "StopThenReset",
+				inner: func(m *quartz.Mock) *quartz.Ticker {
+					tkr := m.NewTicker(time.Second)
+					tkr.Stop()
+					return tkr
+				},
+				after: func(_ *quartz.Mock, tkr *quartz.Ticker) { tkr.Reset(time.Second) },
+			},
+			{
+				name:  "ResetWithoutStop",
+				inner: func(m *quartz.Mock) *quartz.Ticker { return m.NewTicker(time.Second) },
+				after: func(_ *quartz.Mock, tkr *quartz.Ticker) { tkr.Reset(time.Second) },
+			},
+			{
+				name:  "NewTicker",
+				inner: func(*quartz.Mock) *quartz.Ticker { return nil },
+				after: func(m *quartz.Mock, _ *quartz.Ticker) { _ = m.NewTicker(time.Second) },
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-		var mClock *quartz.Mock
-		var tkr *quartz.Ticker
-		t.Run("Inner", func(t *testing.T) {
-			mClock = quartz.NewMock(t)
-			tkr = mClock.NewTicker(time.Second)
-			tkr.Stop()
-		})
-		tkr.Reset(time.Second)
-		if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
-			t.Fatal(err)
+				var mClock *quartz.Mock
+				var tkr *quartz.Ticker
+				t.Run("Inner", func(t *testing.T) {
+					mClock = quartz.NewMock(t)
+					tkr = tc.inner(mClock)
+				})
+				tc.after(mClock, tkr)
+				if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
+					t.Fatal(err)
+				}
+			})
 		}
 	})
 }
