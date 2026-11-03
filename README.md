@@ -452,7 +452,8 @@ Which to use:
   bubble, `time.Sleep`, `sync.WaitGroup`, or `sync.Cond`, use `synctest` with `quartz.NewReal()`. No
   `*Mock` is needed.
 - If the test does real network I/O, for example against a database, use a `*Mock` outside a
-  bubble.
+  bubble. On Go 1.27, an HTTP test can instead serve with `httptest.NewTestServer`, send requests
+  with its `Client()`, and stay in the bubble.
 - If you need traps, or want to move one clock without moving every timer in the bubble, use a
   `*Mock`, inside or outside a bubble.
 
