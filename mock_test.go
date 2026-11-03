@@ -635,21 +635,41 @@ func TestExpiredContext_WorkPending(t *testing.T) {
 		mClock.AfterFunc(time.Second, func() { <-release })
 		w := mClock.Advance(time.Second)
 		// The advance cannot complete until the AfterFunc returns.
-		err := w.Wait(expired)
-		close(release)
-		w.MustWait(ctx)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+		errs := make(chan error, 1)
+		go func() { errs <- w.Wait(expired) }()
+		select {
+		case err := <-errs:
+			close(release)
+			w.MustWait(ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+			}
+		case <-ctx.Done():
+			close(release)
+			t.Fatal("Wait() did not return after the context expired")
 		}
 	})
 
 	t.Run("Trap", func(t *testing.T) {
 		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
 		mClock := quartz.NewMock(t)
 		trap := mClock.Trap().Now()
 		defer trap.Close()
-		if _, err := trap.Wait(expired); !errors.Is(err, context.Canceled) {
-			t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+		errs := make(chan error, 1)
+		go func() {
+			_, err := trap.Wait(expired)
+			errs <- err
+		}()
+		select {
+		case err := <-errs:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+			}
+		case <-ctx.Done():
+			t.Fatal("Wait() did not return after the context expired")
 		}
 	})
 }
