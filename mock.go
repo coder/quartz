@@ -739,12 +739,13 @@ type afterFunc struct{ f func() }
 // requires a deadline while leaving expiry to Done() and Err(), which follow mock time.
 var noWallDeadline = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
-// AfterFunc lets stdlib contexts derived from c register for cancellation instead of each
-// starting a goroutine that waits on Done (see context.afterFuncer). Registered functions run
-// before fire or the cancel function returns, so derived contexts are done by the time
-// Advance().MustWait() or cancel() returns.
+// AfterFunc lets stdlib contexts created directly from c register for cancellation instead of
+// each starting a goroutine that waits on Done (see context.afterFuncer). Registered functions
+// run before fire or the cancel function returns, so those contexts are done by the time
+// Advance().MustWait() or cancel() returns. Contexts derived through another layer, such as
+// context.WithValue, still use a goroutine because the context package does not forward
+// AfterFunc.
 func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
-	c.checkParent()
 	c.mock.mu.Lock()
 	defer c.mock.mu.Unlock()
 	if c.err != nil {
@@ -771,14 +772,17 @@ func (c *mockCtx) Deadline() (time.Time, bool) {
 	return c.wallDeadline, true
 }
 
-// Done and Err check the parent first because context.AfterFunc reports parent cancellation
-// asynchronously, and stdlib contexts are done as soon as their parent is.
+// Done, Err, and Value check the parent first because context.AfterFunc reports parent
+// cancellation asynchronously, and stdlib contexts are done as soon as their parent is. Value
+// is included because context.Cause reads the cause through it. A Done channel obtained before
+// the parent was canceled closes when the context.AfterFunc goroutine runs.
 func (c *mockCtx) Done() <-chan struct{} {
 	c.checkParent()
 	return c.done
 }
 
 func (c *mockCtx) Value(key any) any {
+	c.checkParent()
 	return c.inner.Value(key)
 }
 
