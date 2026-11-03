@@ -20,10 +20,11 @@ type Ticker struct {
 	// not to be reading. That means we need to start a new goroutine to do the channel write (runLoop) if we are a
 	// channel-based ticker.
 	//
-	// They also are not supposed to leak even if they are never read or stopped (Go runtime can garbage collect them).
-	// We can't garbage-collect because we can't check if any other code besides the mock references, but we can ensure
-	// that we don't leak goroutines so that the garbage collector can do its job when the mock is no longer
-	// referenced. The channels below allow us to interrupt the runLoop goroutine.
+	// They also are not supposed to leak even if they are never read or stopped (Go runtime can
+	// garbage collect them). We can't garbage-collect because we can't check if any other code
+	// besides the mock references, but we can ensure that we don't leak goroutines so that the
+	// garbage collector can do its job when the mock is no longer referenced. interrupt lets Stop
+	// end the runLoop goroutine; Mock.done ends it when NewMock's cleanup runs.
 	interrupt chan struct{}
 }
 
@@ -37,8 +38,12 @@ func (t *Ticker) fire(tt time.Time) {
 		t.nxt = t.nxt.Add(t.d)
 	}
 	t.mock.recomputeNextLocked()
-	if t.interrupt != nil { // implies runLoop is still going.
-		t.internalTicks <- tt
+	// A non-nil interrupt means runLoop is running or has returned because done was closed.
+	if t.interrupt != nil {
+		select {
+		case t.internalTicks <- tt:
+		case <-t.mock.done:
+		}
 	}
 }
 
@@ -108,9 +113,13 @@ outer:
 					// Discard future ticks until we can send this one.
 				case interrupt <- struct{}{}:
 					return
+				case <-t.mock.done:
+					return
 				}
 			}
 		case interrupt <- struct{}{}:
+			return
+		case <-t.mock.done:
 			return
 		}
 	}

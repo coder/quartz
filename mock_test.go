@@ -787,6 +787,24 @@ func TestNoLeak_Go123(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+
+	t.Run("TickerResetAfterTestEnds", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var mClock *quartz.Mock
+		var tkr *quartz.Ticker
+		t.Run("Inner", func(t *testing.T) {
+			mClock = quartz.NewMock(t)
+			tkr = mClock.NewTicker(time.Second)
+			tkr.Stop()
+		})
+		tkr.Reset(time.Second)
+		if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestTickerStop_Go123(t *testing.T) {
