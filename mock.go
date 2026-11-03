@@ -74,9 +74,9 @@ func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, 
 }
 
 // NewTicker creates a mocked ticker attached to this Mock. The ticker stops sending ticks when the
-// cleanup that NewTicker registers runs, and advancing the clock after that sends none. A Reset
-// after that cleanup starts the ticker again, and only Stop ends it then. Best practice is to only
-// manipulate the mock time in the main goroutine of the test.
+// cleanup registered by NewMock runs, so its goroutine does not outlive the test. Cleanups
+// registered after NewMock run before that cleanup and can still receive ticks. Best practice is to
+// only manipulate the mock time in the main goroutine of the test.
 func (m *Mock) NewTicker(d time.Duration, tags ...string) *Ticker {
 	if d <= 0 {
 		panic("NewTicker called with negative or zero duration")
