@@ -38,7 +38,8 @@ func (t *Ticker) fire(tt time.Time) {
 		t.nxt = t.nxt.Add(t.d)
 	}
 	t.mock.recomputeNextLocked()
-	// A non-nil interrupt means runLoop is running or has returned because done was closed.
+	// A non-nil interrupt means runLoop is running or has returned because done was closed. In the
+	// second case nothing receives from internalTicks, so the send must also select on done.
 	if t.interrupt != nil {
 		select {
 		case t.internalTicks <- tt:
