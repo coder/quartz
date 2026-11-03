@@ -690,7 +690,7 @@ func TestTimer_AbandonedAdvance(t *testing.T) {
 		tb := newCleanupTB(t)
 		mClock := quartz.NewMock(tb)
 		_ = mClock.NewTimer(time.Second)
-		labeledAdvance(ctx, t.Name(), mClock, time.Second).MustWait(ctx)
+		labeledAdvance(ctx, t, t.Name(), mClock, time.Second).MustWait(ctx)
 		// Only the goroutine blocked writing to the unread timer channel remains.
 		waitLabeledGoroutines(ctx, t, t.Name(), 1)
 
@@ -708,7 +708,7 @@ func TestTimer_AbandonedAdvance(t *testing.T) {
 		_ = mClock.NewTimer(time.Second)
 
 		tb.runCleanups()
-		labeledAdvance(ctx, t.Name(), mClock, time.Second).MustWait(ctx)
+		labeledAdvance(ctx, t, t.Name(), mClock, time.Second).MustWait(ctx)
 		waitLabeledGoroutines(ctx, t, t.Name(), 0)
 	})
 }
@@ -718,15 +718,16 @@ const goroutineLabelKey = "quartz_test"
 
 // labeledAdvance calls mClock.Advance with the pprof label goroutineLabelKey set to label.
 // Goroutines inherit labels from the goroutine that starts them, so every goroutine that the
-// Advance starts, directly or indirectly, carries the label.
+// Advance starts, directly or indirectly, carries the label. It does not use pprof.Do because
+// the pprof.Do frame cannot be marked as a test helper, so the mock's log lines would not point
+// at the caller.
 func labeledAdvance(
-	ctx context.Context, label string, mClock *quartz.Mock, d time.Duration,
+	ctx context.Context, t testing.TB, label string, mClock *quartz.Mock, d time.Duration,
 ) quartz.AdvanceWaiter {
-	var w quartz.AdvanceWaiter
-	pprof.Do(ctx, pprof.Labels(goroutineLabelKey, label), func(context.Context) {
-		w = mClock.Advance(d)
-	})
-	return w
+	t.Helper()
+	pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels(goroutineLabelKey, label)))
+	defer pprof.SetGoroutineLabels(ctx)
+	return mClock.Advance(d)
 }
 
 // waitLabeledGoroutines waits until exactly want goroutines carry the label set by
