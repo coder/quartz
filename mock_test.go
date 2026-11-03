@@ -591,6 +591,35 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 }
 
+// TestTimer_ReadableDuringCleanup checks that a cleanup registered after NewMock, which runs before
+// NewMock's cleanup, can still receive from a timer that fired during the test. Tests that stop a
+// server in such a cleanup rely on this when a worker reads the timer on its way out.
+func TestTimer_ReadableDuringCleanup(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mClock := quartz.NewMock(t)
+	busy := make(chan struct{})
+	exited := make(chan struct{})
+	// Stands in for a server's Close: it unblocks the worker and waits for it to exit.
+	t.Cleanup(func() {
+		close(busy)
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("worker did not receive the timer value during cleanup")
+		}
+	})
+	tmr := mClock.NewTimer(time.Second)
+	go func() {
+		defer close(exited)
+		<-busy
+		<-tmr.C
+	}()
+	mClock.Advance(time.Second).MustWait(ctx)
+}
+
 // TestNoLeak_Go123 relies on verifyNoLeakTestMain to report goroutines that outlive the tests.
 func TestNoLeak_Go123(t *testing.T) {
 	t.Parallel()
