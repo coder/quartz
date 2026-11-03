@@ -475,8 +475,8 @@ Inside a bubble:
   `close of synctest channel from outside bubble`.
 - Test timeouts created in a bubble, such as the `ctx` you pass to `MustWait`, run on bubble time.
   Make them longer than the bubble time that passes while they are in use: a 10-second `ctx` expires
-  during a `time.Sleep(time.Minute)` in the test. A long timeout costs no wall time, because a stuck
-  test reaches it immediately.
+  during a `time.Sleep(time.Minute)` in the test. A long timeout costs no wall time: when every
+  goroutine in the bubble is durably blocked, bubble time jumps straight to it.
 
 ## Why another time testing library?
 
