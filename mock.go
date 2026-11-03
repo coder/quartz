@@ -232,8 +232,9 @@ type AdvanceWaiter struct {
 	ch chan struct{}
 }
 
-// Wait for all timers and ticks to complete, or until context expires. If the timers and ticks
-// have completed, Wait returns nil even if the context has also expired.
+// Wait for all timers and ticks to complete, or until context expires. If they have completed by
+// the time the context expires, Wait returns nil. Triggered timers and ticks run on other
+// goroutines, so a context that has already expired gives them no time to complete.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-w.ch:
@@ -691,7 +692,9 @@ type Call struct {
 }
 
 // Release the call and wait for it to complete. If the provided context expires before the call completes, it returns
-// an error. If the call has completed, Release returns nil even if the context has also expired.
+// an error. If the call has completed by the time the context expires, Release returns nil.
+// The call completes only after it is released, so a context that has already expired gives it
+// no time to complete.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
