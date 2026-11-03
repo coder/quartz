@@ -24,7 +24,7 @@ type Ticker struct {
 	// garbage collect them). We can't garbage-collect because we can't check if any other code
 	// besides the mock references, but we can ensure that we don't leak goroutines so that the
 	// garbage collector can do its job when the mock is no longer referenced. interrupt lets Stop
-	// end the runLoop goroutine; Mock.done ends it when NewMock's cleanup runs.
+	// and the cleanup registered by NewMock end the runLoop goroutine.
 	interrupt chan struct{}
 }
 
@@ -38,13 +38,8 @@ func (t *Ticker) fire(tt time.Time) {
 		t.nxt = t.nxt.Add(t.d)
 	}
 	t.mock.recomputeNextLocked()
-	// A non-nil interrupt means runLoop is running or has returned because done was closed. In the
-	// second case nothing receives from internalTicks, so the send must also select on done.
-	if t.interrupt != nil {
-		select {
-		case t.internalTicks <- tt:
-		case <-t.mock.done:
-		}
+	if t.interrupt != nil { // implies runLoop is still going.
+		t.internalTicks <- tt
 	}
 }
 
@@ -68,10 +63,7 @@ func (t *Ticker) Stop(tags ...string) {
 	t.mock.removeEventLocked(t)
 	t.stopped = true
 	// check if we've already fired, and if so, interrupt it.
-	if t.interrupt != nil {
-		<-t.interrupt
-		t.interrupt = nil
-	}
+	t.stopRunLoopLocked()
 }
 
 // Reset stops a ticker and resets its period to the specified duration. The
@@ -114,13 +106,9 @@ outer:
 					// Discard future ticks until we can send this one.
 				case interrupt <- struct{}{}:
 					return
-				case <-t.mock.done:
-					return
 				}
 			}
 		case interrupt <- struct{}{}:
-			return
-		case <-t.mock.done:
 			return
 		}
 	}
@@ -131,9 +119,24 @@ func (t *Ticker) startRunLoopLocked() {
 	if t.interrupt != nil {
 		t.mock.tb.Error("called startRunLoopLocked when interrupt suggests we are already running")
 	}
+	// NewMock's cleanup has run and would not stop the runLoop, so the ticker sends no ticks.
+	if t.mock.testOver {
+		return
+	}
 	interrupt := make(chan struct{})
 	t.interrupt = interrupt
+	t.mock.tickers[t] = struct{}{}
 	go t.runLoop(interrupt)
+}
+
+// stopRunLoopLocked ends the runLoop goroutine, if it is running.
+func (t *Ticker) stopRunLoopLocked() {
+	if t.interrupt == nil {
+		return
+	}
+	<-t.interrupt
+	t.interrupt = nil
+	delete(t.mock.tickers, t)
 }
 
 func newMockTickerLocked(m *Mock, d time.Duration) *Ticker {

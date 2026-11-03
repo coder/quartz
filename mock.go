@@ -33,8 +33,9 @@ type Mock struct {
 	// writes holds the timers that have a goroutine sending their fired value on C. The cleanup
 	// registered in NewMock ends those goroutines.
 	writes map[*Timer]struct{}
-	// done is closed by the cleanup registered in NewMock to end ticker run loops.
-	done chan struct{}
+	// tickers holds the tickers whose runLoop goroutine is running. The cleanup registered in
+	// NewMock stops those goroutines.
+	tickers map[*Ticker]struct{}
 
 	// cur is the current time
 	cur time.Time
@@ -501,11 +502,11 @@ func NewMock(tb TestingT) *Mock {
 		panic(err)
 	}
 	m := &Mock{
-		tb:     tb,
-		logger: tb,
-		cur:    cur,
-		writes: make(map[*Timer]struct{}),
-		done:   make(chan struct{}),
+		tb:      tb,
+		logger:  tb,
+		cur:     cur,
+		writes:  make(map[*Timer]struct{}),
+		tickers: make(map[*Ticker]struct{}),
 	}
 	tb.Cleanup(func() {
 		m.mu.Lock()
@@ -514,7 +515,9 @@ func NewMock(tb TestingT) *Mock {
 		for t := range m.writes {
 			t.endWriteLocked()
 		}
-		close(m.done)
+		for t := range m.tickers {
+			t.stopRunLoopLocked()
+		}
 		m.logger.Logf("Mock Clock - test cleanup; will no longer log clock events")
 	})
 	return m
