@@ -3,6 +3,7 @@
 package quartz_test
 
 import (
+	"context"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -11,40 +12,57 @@ import (
 )
 
 // TestTimer_ReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup
-// runs still receives a timer value written after that cleanup, as happens when the write's
-// goroutine is scheduled late. The timers fire from a later cleanup to get that order on every
-// run. synctest.Wait makes sure the readers are waiting before NewMock's cleanup runs and that
-// every write has ended before the check.
+// runs receives the value of a timer that fires just before or after that cleanup. synctest.Wait
+// makes sure the reader is waiting before the timer fires and that the send has ended before the
+// check.
 func TestTimer_ReaderWaitingAtMockCleanup(t *testing.T) {
 	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		// select picks at random among ready cases, so a write that does not try the waiting reader
-		// first still reaches it half the time. With 10 timers, the test then fails in all but 1 of
-		// 1024 runs.
-		const n = 10
-		var mClock *quartz.Mock
-		received := make(chan struct{}, n)
-		quit := make(chan struct{})
-		// Registered before NewMock, so it runs after NewMock's cleanup.
-		t.Cleanup(func() {
-			mClock.Advance(time.Second)
-			synctest.Wait()
-			close(quit)
-			if got := len(received); got != n {
-				t.Errorf("%d of %d waiting readers received the timer value", got, n)
+	for _, tc := range []struct {
+		name             string
+		fireAfterCleanup bool
+	}{
+		// The test fires the timer as its last step. In a bubble, the goroutine that sends the
+		// value often starts only after NewMock's cleanup is waiting to end it.
+		{name: "FiredBeforeCleanup"},
+		{name: "FiredAfterCleanup", fireAfterCleanup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// When the sending goroutine starts late, select picks at random between the reader
+			// and the cleanup, so a send that does not try the reader first loses the value about
+			// half the time. Each round is a new bubble, so without the race detector, which
+			// changes scheduling, the test then fails in nearly every run.
+			for range 10 {
+				synctest.Test(t, func(t *testing.T) {
+					var mClock *quartz.Mock
+					received := make(chan struct{}, 1)
+					quit := make(chan struct{})
+					// Registered before NewMock, so it runs after NewMock's cleanup.
+					t.Cleanup(func() {
+						if tc.fireAfterCleanup {
+							mClock.Advance(time.Second)
+						}
+						synctest.Wait()
+						close(quit)
+						if len(received) == 0 {
+							t.Error("the waiting reader did not receive the timer value")
+						}
+					})
+					mClock = quartz.NewMock(t)
+					tmr := mClock.NewTimer(time.Second)
+					go func() {
+						select {
+						case <-tmr.C:
+							received <- struct{}{}
+						case <-quit:
+						}
+					}()
+					synctest.Wait()
+					if !tc.fireAfterCleanup {
+						mClock.Advance(time.Second).MustWait(context.Background())
+					}
+				})
 			}
 		})
-		mClock = quartz.NewMock(t)
-		for range n {
-			tmr := mClock.NewTimer(time.Second)
-			go func() {
-				select {
-				case <-tmr.C:
-					received <- struct{}{}
-				case <-quit:
-				}
-			}()
-		}
-		synctest.Wait()
-	})
+	}
 }
