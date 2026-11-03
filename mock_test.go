@@ -341,27 +341,45 @@ func TestTickerFunc_MockContextCanceled(t *testing.T) {
 	}
 }
 
-// A mock context expires when Advance reaches its deadline. By the time MustWait returns, it and
-// the contexts derived from it report DeadlineExceeded and the deadline's cause.
+// A mock context expires when Advance or AdvanceNext reaches its deadline. By the time MustWait
+// returns, it and the contexts derived from it report DeadlineExceeded and the deadline's cause.
 func TestWithTimeout_FiresOnAdvance(t *testing.T) {
 	t.Parallel()
 
 	deadlineCause := errors.New("deadline cause")
+	withTimeout := func(mClock *quartz.Mock) (context.Context, context.CancelFunc) {
+		return mClock.WithTimeout(context.Background(), time.Second)
+	}
+	advance := func(_ *testing.T, mClock *quartz.Mock) quartz.AdvanceWaiter {
+		return mClock.Advance(time.Second)
+	}
 	tests := map[string]struct {
 		newCtx    func(mClock *quartz.Mock) (context.Context, context.CancelFunc)
+		move      func(t *testing.T, mClock *quartz.Mock) quartz.AdvanceWaiter
 		wantCause error
 	}{
 		"WithTimeout": {
-			newCtx: func(mClock *quartz.Mock) (context.Context, context.CancelFunc) {
-				return mClock.WithTimeout(context.Background(), time.Second)
-			},
+			newCtx:    withTimeout,
+			move:      advance,
 			wantCause: context.DeadlineExceeded,
 		},
 		"WithTimeoutCause": {
 			newCtx: func(mClock *quartz.Mock) (context.Context, context.CancelFunc) {
 				return mClock.WithTimeoutCause(context.Background(), time.Second, deadlineCause)
 			},
+			move:      advance,
 			wantCause: deadlineCause,
+		},
+		"AdvanceNext": {
+			newCtx: withTimeout,
+			move: func(t *testing.T, mClock *quartz.Mock) quartz.AdvanceWaiter {
+				d, w := mClock.AdvanceNext()
+				if d != time.Second {
+					t.Errorf("expected AdvanceNext to advance 1s, got %s", d)
+				}
+				return w
+			},
+			wantCause: context.DeadlineExceeded,
 		},
 	}
 	for name, tt := range tests {
@@ -376,7 +394,7 @@ func TestWithTimeout_FiresOnAdvance(t *testing.T) {
 			ctxs := descendants(t, mClock, ctx)
 			ctxs["Self"] = ctx
 
-			mClock.Advance(time.Second).MustWait(testCtx)
+			tt.move(t, mClock).MustWait(testCtx)
 
 			for name, c := range ctxs {
 				if !errors.Is(c.Err(), context.DeadlineExceeded) {
@@ -1209,124 +1227,105 @@ func TestWithTimeout_Trap(t *testing.T) {
 	}
 }
 
-// The failures name the events that stop the clock, so that a pending mock context is not mistaken
-// for a timer or ticker.
+// Failures to move the clock name the events that block it, and the AdvanceNext failure lists the
+// kinds of event it looks for, so a pending mock context is not mistaken for a timer or ticker.
 func TestMock_FailureNamesBlockingEvents(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Advance", func(t *testing.T) {
-		t.Parallel()
-		for _, tc := range []struct {
-			name     string
-			schedule func(t *testing.T, mClock *quartz.Mock, tags []string)
-			want     string
-		}{
-			{"WithTimeout", func(t *testing.T, mClock *quartz.Mock, tags []string) {
+	advanceHour := func(mClock *quartz.Mock) { mClock.Advance(time.Hour) }
+	tests := map[string]struct {
+		schedule func(t *testing.T, mClock *quartz.Mock, tags []string)
+		move     func(mClock *quartz.Mock)
+		want     string
+	}{
+		"AdvancePastWithTimeout": {
+			schedule: func(t *testing.T, mClock *quartz.Mock, tags []string) {
 				_, cancel := mClock.WithTimeout(context.Background(), 30*time.Second, tags...)
 				t.Cleanup(cancel)
-			}, "mock context from WithTimeout(..., [a])"},
-			{"NewTimer", func(_ *testing.T, mClock *quartz.Mock, tags []string) {
+			},
+			move: advanceHour,
+			want: "cannot advance 1h0m0s which is beyond next event in 30s: " +
+				"mock context from WithTimeout(..., [a])",
+		},
+		"AdvancePastNewTimer": {
+			schedule: func(_ *testing.T, mClock *quartz.Mock, tags []string) {
 				mClock.NewTimer(30*time.Second, tags...)
-			}, "timer from NewTimer(..., [a])"},
-			{"AfterFunc", func(_ *testing.T, mClock *quartz.Mock, tags []string) {
+			},
+			move: advanceHour,
+			want: "cannot advance 1h0m0s which is beyond next event in 30s: " +
+				"timer from NewTimer(..., [a])",
+		},
+		"AdvancePastAfterFunc": {
+			schedule: func(_ *testing.T, mClock *quartz.Mock, tags []string) {
 				mClock.AfterFunc(30*time.Second, func() {}, tags...)
-			}, "timer from AfterFunc(..., [a])"},
-			{"NewTicker", func(_ *testing.T, mClock *quartz.Mock, tags []string) {
+			},
+			move: advanceHour,
+			want: "cannot advance 1h0m0s which is beyond next event in 30s: " +
+				"timer from AfterFunc(..., [a])",
+		},
+		"AdvancePastNewTicker": {
+			schedule: func(_ *testing.T, mClock *quartz.Mock, tags []string) {
 				mClock.NewTicker(30*time.Second, tags...)
-			}, "ticker from NewTicker(..., [a])"},
-			{"TickerFunc", func(t *testing.T, mClock *quartz.Mock, tags []string) {
+			},
+			move: advanceHour,
+			want: "cannot advance 1h0m0s which is beyond next event in 30s: " +
+				"ticker from NewTicker(..., [a])",
+		},
+		"AdvancePastTickerFunc": {
+			schedule: func(t *testing.T, mClock *quartz.Mock, tags []string) {
 				ctx, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)
 				mClock.TickerFunc(ctx, 30*time.Second, func() error { return nil }, tags...)
-			}, "ticker from TickerFunc(..., [a])"},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				tb := &captureFailTB{TB: t}
-				mClock := quartz.NewMock(tb)
-				tags := []string{"a"}
-				tc.schedule(t, mClock, tags)
-				// The caller may reuse its tags slice once the call returns. The failure still
-				// reports the tags the event was created with.
-				tags[0] = "reused"
+			},
+			move: advanceHour,
+			want: "cannot advance 1h0m0s which is beyond next event in 30s: " +
+				"ticker from TickerFunc(..., [a])",
+		},
+		"SetPastTwoEvents": {
+			schedule: func(t *testing.T, mClock *quartz.Mock, tags []string) {
+				mClock.NewTimer(30 * time.Second)
+				deadline := mClock.Now().Add(30 * time.Second)
+				_, cancel := mClock.WithDeadline(context.Background(), deadline, tags...)
+				t.Cleanup(cancel)
+			},
+			move: func(mClock *quartz.Mock) { mClock.Set(mClock.Now().Add(time.Hour)) },
+			want: "cannot Set time to 2024-01-01 01:00:00 +0000 UTC which is beyond next event at " +
+				"2024-01-01 00:00:30 +0000 UTC: timer from NewTimer(..., []), " +
+				"mock context from WithDeadline(..., [a])",
+		},
+		"SetBackward": {
+			schedule: func(t *testing.T, mClock *quartz.Mock, tags []string) {
+				_, cancel := mClock.WithTimeout(context.Background(), 30*time.Second, tags...)
+				t.Cleanup(cancel)
+			},
+			move: func(mClock *quartz.Mock) { mClock.Set(mClock.Now().Add(-time.Hour)) },
+			want: "Set mock clock to the past while events are scheduled, next at " +
+				"2024-01-01 00:00:30 +0000 UTC: mock context from WithTimeout(..., [a])",
+		},
+		"AdvanceNextWithNothingScheduled": {
+			schedule: func(*testing.T, *quartz.Mock, []string) {},
+			move:     func(mClock *quartz.Mock) { mClock.AdvanceNext() },
+			want: "cannot AdvanceNext because no timers, tickers, or mock contexts are " +
+				"scheduled",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tb := &captureFailTB{TB: t}
+			mClock := quartz.NewMock(tb)
+			tags := []string{"a"}
+			tt.schedule(t, mClock, tags)
+			// The caller may reuse its tags slice once the call returns. The failure still reports
+			// the tags the event was created with.
+			tags[0] = "reused"
 
-				mClock.Advance(time.Hour)
-				want := []string{
-					"cannot advance 1h0m0s which is beyond next event in 30s: " + tc.want,
-				}
-				if !slices.Equal(tb.errs, want) {
-					t.Fatalf("expected errors %q, got %q", want, tb.errs)
-				}
-			})
-		}
-	})
-
-	t.Run("Set", func(t *testing.T) {
-		t.Parallel()
-		tb := &captureFailTB{TB: t}
-		mClock := quartz.NewMock(tb)
-		start := mClock.Now()
-		mClock.NewTimer(30 * time.Second)
-		_, cancel := mClock.WithDeadline(context.Background(), start.Add(30*time.Second), "a")
-		defer cancel()
-
-		mClock.Set(start.Add(time.Hour))
-		want := []string{"cannot Set time to 2024-01-01 01:00:00 +0000 UTC which is beyond next " +
-			"event at 2024-01-01 00:00:30 +0000 UTC: timer from NewTimer(..., []), " +
-			"mock context from WithDeadline(..., [a])"}
-		if !slices.Equal(tb.errs, want) {
-			t.Fatalf("expected errors %q, got %q", want, tb.errs)
-		}
-	})
-
-	t.Run("SetPast", func(t *testing.T) {
-		t.Parallel()
-		tb := &captureFailTB{TB: t}
-		mClock := quartz.NewMock(tb)
-		start := mClock.Now()
-		_, cancel := mClock.WithTimeout(context.Background(), 30*time.Second, "a")
-		defer cancel()
-
-		mClock.Set(start.Add(-time.Hour))
-		want := []string{"Set mock clock to the past while events are scheduled, next at " +
-			"2024-01-01 00:00:30 +0000 UTC: mock context from WithTimeout(..., [a])"}
-		if !slices.Equal(tb.errs, want) {
-			t.Fatalf("expected errors %q, got %q", want, tb.errs)
-		}
-	})
-
-	t.Run("AdvanceNext", func(t *testing.T) {
-		t.Parallel()
-		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer testCancel()
-		tb := &captureFailTB{TB: t}
-		mClock := quartz.NewMock(tb)
-		ctx, cancel := mClock.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		// A pending mock context is the next event.
-		d, w := mClock.AdvanceNext()
-		if err := w.Wait(testCtx); err != nil {
-			t.Fatalf("waiting for AdvanceNext: %v", err)
-		}
-		if d != 30*time.Second {
-			t.Fatalf("expected AdvanceNext to advance 30s, got %s", d)
-		}
-		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
-		}
-		if len(tb.errs) != 0 {
-			t.Fatalf("expected no errors, got %q", tb.errs)
-		}
-
-		mClock.AdvanceNext()
-		want := []string{
-			"cannot AdvanceNext because no timers, tickers, or mock contexts are scheduled",
-		}
-		if !slices.Equal(tb.errs, want) {
-			t.Fatalf("expected errors %q, got %q", want, tb.errs)
-		}
-	})
+			tt.move(mClock)
+			if want := []string{tt.want}; !slices.Equal(tb.errs, want) {
+				t.Fatalf("expected errors %q, got %q", want, tb.errs)
+			}
+		})
+	}
 }
 
 func Test_MultipleTraps(t *testing.T) {
