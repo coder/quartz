@@ -39,9 +39,9 @@ func (t *Timer) fire(tt time.Time) {
 		t.fn()
 		return
 	} else {
-		// Timer channel writes are abandoned when the test ends, so that the write goroutine does
-		// not leak beyond the test. Side effect is that timer channels cannot be read after the
-		// test exits.
+		// Timer channel writes are abandoned when the cleanup registered by NewMock runs, so that
+		// the write goroutine does not leak beyond the test. Side effect is that timer channels
+		// cannot be read after that cleanup runs.
 		if t.mock.testOver {
 			t.mock.mu.Unlock()
 			return

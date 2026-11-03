@@ -30,9 +30,7 @@ type Mock struct {
 	logger   Logger
 	mu       sync.Mutex
 	testOver bool
-	// done is closed by the cleanup registered in NewMock, which ends all pending timer channel
-	// writes. Timers can fire after the test's cleanups have run, so a cleanup registered by the
-	// fire itself would never run.
+	// done is closed by the cleanup registered in NewMock to end all pending timer channel writes.
 	done chan struct{}
 
 	// cur is the current time
