@@ -40,13 +40,8 @@ func (t *Timer) fire(tt time.Time) {
 		return
 	} else {
 		// The cleanup registered by NewMock ends pending timer channel writes, so the write
-		// goroutine does not leak beyond the test. A timer that fires after that cleanup has run
-		// is not written at all. A write already pending when it runs may still be received by a
-		// reader that is waiting at that moment.
-		if t.mock.testOver {
-			t.mock.mu.Unlock()
-			return
-		}
+		// goroutine does not leak beyond the test. A write already pending when it runs may still
+		// be received by a reader that is waiting at that moment.
 		interrupt := make(chan struct{})
 		t.interrupt = interrupt
 		t.mock.mu.Unlock()
