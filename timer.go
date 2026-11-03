@@ -48,6 +48,10 @@ func (t *Timer) fire(tt time.Time) {
 		default:
 		}
 	} else {
+		// Reset and NewTimer fire a timer with a non-positive duration from a new goroutine, so the
+		// timer can fire again before the write from an earlier fire has ended. writes tracks one
+		// write per timer, so end the earlier one, as Reset would.
+		t.endWriteLocked()
 		interrupt := make(chan struct{})
 		t.interrupt = interrupt
 		t.mock.writes[t] = struct{}{}

@@ -636,6 +636,16 @@ func TestNoLeak_Go123(t *testing.T) {
 		mClock.Advance(1 * time.Second).MustWait(ctx)
 	})
 
+	// NewTimer and Reset fire a timer with a non-positive duration from a new goroutine, so both
+	// fires can start a write before either ends. Over 100 rounds, that happens in most of them.
+	t.Run("TimerFiredTwice", func(t *testing.T) {
+		t.Parallel()
+		for range 100 {
+			tmr := quartz.NewMock(t).WithLogger(quartz.NoOpLogger).NewTimer(0)
+			tmr.Reset(0)
+		}
+	})
+
 	// A test that stops waiting on an Advance can end before its timers fire.
 	t.Run("TimerFiredAfterTestEnds", func(t *testing.T) {
 		t.Parallel()
