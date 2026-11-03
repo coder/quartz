@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1208,6 +1209,122 @@ func TestWithTimeout_Trap(t *testing.T) {
 	}
 }
 
+// The failures name the events that stop the clock, so that a pending mock context is not mistaken
+// for a timer or ticker.
+func TestMock_FailureNamesBlockingEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Advance", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name     string
+			schedule func(t *testing.T, mClock *quartz.Mock)
+			want     string
+		}{
+			{"WithTimeout", func(t *testing.T, mClock *quartz.Mock) {
+				_, cancel := mClock.WithTimeout(context.Background(), 30*time.Second, "a")
+				t.Cleanup(cancel)
+			}, "mock context from WithTimeout(..., [a])"},
+			{"NewTimer", func(_ *testing.T, mClock *quartz.Mock) {
+				mClock.NewTimer(30*time.Second, "a")
+			}, "timer from NewTimer(..., [a])"},
+			{"AfterFunc", func(_ *testing.T, mClock *quartz.Mock) {
+				mClock.AfterFunc(30*time.Second, func() {}, "a")
+			}, "timer from AfterFunc(..., [a])"},
+			{"NewTicker", func(_ *testing.T, mClock *quartz.Mock) {
+				mClock.NewTicker(30*time.Second, "a")
+			}, "ticker from NewTicker(..., [a])"},
+			{"TickerFunc", func(t *testing.T, mClock *quartz.Mock) {
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				mClock.TickerFunc(ctx, 30*time.Second, func() error { return nil }, "a")
+			}, "ticker from TickerFunc(..., [a])"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				tb := &captureFailTB{TB: t}
+				mClock := quartz.NewMock(tb)
+				tc.schedule(t, mClock)
+
+				mClock.Advance(time.Hour)
+				want := []string{
+					"cannot advance 1h0m0s which is beyond next event in 30s: " + tc.want,
+				}
+				if !slices.Equal(tb.errs, want) {
+					t.Fatalf("expected errors %q, got %q", want, tb.errs)
+				}
+			})
+		}
+	})
+
+	t.Run("Set", func(t *testing.T) {
+		t.Parallel()
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
+		start := mClock.Now()
+		mClock.NewTimer(30 * time.Second)
+		_, cancel := mClock.WithDeadline(context.Background(), start.Add(30*time.Second), "a")
+		defer cancel()
+
+		mClock.Set(start.Add(time.Hour))
+		want := []string{"cannot Set time to 2024-01-01 01:00:00 +0000 UTC which is beyond next " +
+			"event at 2024-01-01 00:00:30 +0000 UTC: timer from NewTimer(..., []), " +
+			"mock context from WithDeadline(..., [a])"}
+		if !slices.Equal(tb.errs, want) {
+			t.Fatalf("expected errors %q, got %q", want, tb.errs)
+		}
+	})
+
+	t.Run("SetPast", func(t *testing.T) {
+		t.Parallel()
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
+		start := mClock.Now()
+		_, cancel := mClock.WithTimeout(context.Background(), 30*time.Second, "a")
+		defer cancel()
+
+		mClock.Set(start.Add(-time.Hour))
+		want := []string{"Set mock clock to the past while events are scheduled, next at " +
+			"2024-01-01 00:00:30 +0000 UTC: mock context from WithTimeout(..., [a])"}
+		if !slices.Equal(tb.errs, want) {
+			t.Fatalf("expected errors %q, got %q", want, tb.errs)
+		}
+	})
+
+	t.Run("AdvanceNext", func(t *testing.T) {
+		t.Parallel()
+		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer testCancel()
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
+		ctx, cancel := mClock.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// A pending mock context is the next event.
+		d, w := mClock.AdvanceNext()
+		if err := w.Wait(testCtx); err != nil {
+			t.Fatalf("waiting for AdvanceNext: %v", err)
+		}
+		if d != 30*time.Second {
+			t.Fatalf("expected AdvanceNext to advance 30s, got %s", d)
+		}
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
+		}
+		if len(tb.errs) != 0 {
+			t.Fatalf("expected no errors, got %q", tb.errs)
+		}
+
+		mClock.AdvanceNext()
+		want := []string{
+			"cannot AdvanceNext because no timers, tickers, or mock contexts are scheduled",
+		}
+		if !slices.Equal(tb.errs, want) {
+			t.Fatalf("expected errors %q, got %q", want, tb.errs)
+		}
+	})
+}
+
 func Test_MultipleTraps(t *testing.T) {
 	t.Parallel()
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1332,18 +1449,22 @@ func Test_WithLogger(t *testing.T) {
 
 type captureFailTB struct {
 	failed bool
+	// errs records Error and Errorf messages.
+	errs []string
 	testing.TB
 }
 
 func (t *captureFailTB) Errorf(format string, args ...any) {
 	t.Helper()
 	t.Logf(format, args...)
+	t.errs = append(t.errs, fmt.Sprintf(format, args...))
 	t.failed = true
 }
 
 func (t *captureFailTB) Error(args ...any) {
 	t.Helper()
 	t.Log(args...)
+	t.errs = append(t.errs, fmt.Sprint(args...))
 	t.failed = true
 }
 
@@ -1459,8 +1580,8 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 
 	// The timer's old 1h schedule must not remain in the mock's event list.
-	// If it does, Advance rejects with "cannot advance beyond next
-	// timer/ticker event".
+	// If it does, Advance rejects with "cannot advance 2h0m0s which is beyond
+	// next event".
 	if d, ok := mClock.Peek(); ok {
 		t.Fatalf("expected no pending events, got Peek()=%s", d)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -50,6 +51,20 @@ type Mock struct {
 type event interface {
 	next() time.Time
 	fire(t time.Time)
+	// describe names the event for failure messages.
+	describe() string
+}
+
+// eventSource is the Clock call that created an event.
+type eventSource struct {
+	fn   clockFunction
+	tags []string
+}
+
+// describe formats the call like Trap.String, so the user can find the call or trap it by function
+// and tags.
+func (s eventSource) describe(kind string) string {
+	return fmt.Sprintf("%s from %s(..., %v)", kind, s.fn, s.tags)
 }
 
 func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, tags ...string) Waiter {
@@ -68,6 +83,7 @@ func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, 
 		nxt:  m.cur.Add(d),
 		mock: m,
 		cond: sync.NewCond(&m.mu),
+		src:  eventSource{fn: c.fn, tags: c.Tags},
 	}
 	m.all = append(m.all, t)
 	m.recomputeNextLocked()
@@ -87,7 +103,7 @@ func (m *Mock) NewTicker(d time.Duration, tags ...string) *Ticker {
 	c := newCall(clockFunctionNewTicker, tags, withDuration(d))
 	m.matchCallLocked(c)
 	defer close(c.complete)
-	return newMockTickerLocked(m, d)
+	return newMockTickerLocked(m, d, eventSource{fn: c.fn, tags: c.Tags})
 }
 
 func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
@@ -102,6 +118,7 @@ func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
 		c:    ch,
 		nxt:  m.cur.Add(d),
 		mock: m,
+		src:  eventSource{fn: c.fn, tags: c.Tags},
 	}
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
@@ -123,6 +140,7 @@ func (m *Mock) AfterFunc(d time.Duration, f func(), tags ...string) *Timer {
 		nxt:  m.cur.Add(d),
 		fn:   f,
 		mock: m,
+		src:  eventSource{fn: c.fn, tags: c.Tags},
 	}
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
@@ -199,6 +217,7 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 		finished:     make(chan struct{}),
 		cause:        cause,
 		mock:         m,
+		src:          eventSource{fn: call.fn, tags: call.Tags},
 		done:         make(chan struct{}),
 	}
 
@@ -298,6 +317,15 @@ func (m *Mock) recomputeNextLocked() {
 	}
 	m.nextTime = best
 	m.nextEvents = events
+}
+
+// describeNextEventsLocked lists the events scheduled at nextTime for failure messages.
+func (m *Mock) describeNextEventsLocked() string {
+	descs := make([]string, 0, len(m.nextEvents))
+	for _, e := range m.nextEvents {
+		descs = append(descs, e.describe())
+	}
+	return strings.Join(descs, ", ")
 }
 
 func (m *Mock) removeTimer(t *Timer) {
@@ -407,8 +435,8 @@ func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 		return w
 	}
 	if fin.After(m.nextTime) {
-		m.tb.Errorf("cannot advance %s which is beyond next timer/ticker event in %s",
-			d.String(), m.nextTime.Sub(m.cur))
+		m.tb.Errorf("cannot advance %s which is beyond next event in %s: %s",
+			d.String(), m.nextTime.Sub(m.cur), m.describeNextEventsLocked())
 		m.mu.Unlock()
 		close(w.ch)
 		return w
@@ -454,7 +482,8 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 		defer m.mu.Unlock()
 		// past
 		if !m.nextTime.IsZero() {
-			m.tb.Error("Set mock clock to the past after timers/tickers started")
+			m.tb.Errorf("Set mock clock to the past while events are scheduled, next at %s: %s",
+				m.nextTime, m.describeNextEventsLocked())
 		}
 		m.cur = t
 		return w
@@ -470,8 +499,8 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	if t.After(m.nextTime) {
 		defer close(w.ch)
 		defer m.mu.Unlock()
-		m.tb.Errorf("cannot Set time to %s which is beyond next timer/ticker event at %s",
-			t.String(), m.nextTime)
+		m.tb.Errorf("cannot Set time to %s which is beyond next event at %s: %s",
+			t.String(), m.nextTime, m.describeNextEventsLocked())
 		return w
 	}
 
@@ -494,7 +523,7 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 	if m.nextTime.IsZero() {
 		defer close(w.ch)
 		defer m.mu.Unlock()
-		m.tb.Error("cannot AdvanceNext because there are no timers or tickers running")
+		m.tb.Error("cannot AdvanceNext because no timers, tickers, or mock contexts are scheduled")
 		return 0, w
 	}
 	d := m.nextTime.Sub(m.cur)
@@ -659,10 +688,16 @@ type mockTickerFunc struct {
 	done bool
 	// err holds the error when the ticker exits
 	err error
+
+	src eventSource
 }
 
 func (m *mockTickerFunc) next() time.Time {
 	return m.nxt
+}
+
+func (m *mockTickerFunc) describe() string {
+	return m.src.describe("ticker")
 }
 
 func (m *mockTickerFunc) fire(_ time.Time) {
@@ -731,6 +766,7 @@ var _ Waiter = &mockTickerFunc{}
 type mockCtx struct {
 	mock   *Mock
 	parent context.Context
+	src    eventSource
 
 	// inner stores the cancellation cause so context.Cause() can find it via Value(&cancelCtxKey).
 	// Done() must NOT return inner.Done(): stdlib's parentCancelCtx fast-path would then attach
@@ -906,6 +942,10 @@ func (c *mockCtx) Err() error {
 
 func (c *mockCtx) next() time.Time {
 	return c.deadline
+}
+
+func (c *mockCtx) describe() string {
+	return c.src.describe("mock context")
 }
 
 func (c *mockCtx) fire(_ time.Time) {

@@ -13,6 +13,7 @@ type Ticker struct {
 	mock          *Mock          // mock clock, if set
 	stopped       bool           // true if the ticker is not running
 	internalTicks chan time.Time // used to deliver ticks to the runLoop goroutine
+	src           eventSource    // mock call that created the ticker
 
 	// As of Go 1.23, ticker channels are unbuffered and guaranteed to block forever after a call to stop.
 	//
@@ -44,6 +45,10 @@ func (t *Ticker) fire(tt time.Time) {
 
 func (t *Ticker) next() time.Time {
 	return t.nxt
+}
+
+func (t *Ticker) describe() string {
+	return t.src.describe("ticker")
 }
 
 // Stop turns off a ticker. After Stop, no more ticks will be sent. Stop does
@@ -126,7 +131,7 @@ func (t *Ticker) startRunLoopLocked() {
 	go t.runLoop(interrupt)
 }
 
-func newMockTickerLocked(m *Mock, d time.Duration) *Ticker {
+func newMockTickerLocked(m *Mock, d time.Duration, src eventSource) *Ticker {
 	// no buffer follows Go 1.23+ behavior
 	ticks := make(chan time.Time)
 	t := &Ticker{
@@ -136,6 +141,7 @@ func newMockTickerLocked(m *Mock, d time.Duration) *Ticker {
 		nxt:           m.cur.Add(d),
 		mock:          m,
 		internalTicks: make(chan time.Time),
+		src:           src,
 	}
 	m.addEventLocked(t)
 	m.tb.Cleanup(func() {
