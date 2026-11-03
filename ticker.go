@@ -98,6 +98,14 @@ outer:
 	for {
 		select {
 		case tt := <-t.internalTicks:
+			// select picks at random among ready cases. Send first to a reader that is already
+			// waiting, so it gets the tick even when Stop or NewMock's cleanup is waiting on
+			// interrupt.
+			select {
+			case t.c <- tt:
+				continue outer
+			default:
+			}
 			for {
 				select {
 				case t.c <- tt:
