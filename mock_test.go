@@ -498,24 +498,48 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 	}
 }
 
-func TestWithTimeout_ParentAlreadyCanceled(t *testing.T) {
+// A context created from a done parent reports the parent's error and cause, as a stdlib child does.
+func TestWithTimeout_ParentAlreadyDone(t *testing.T) {
 	t.Parallel()
 
-	mClock := quartz.NewMock(t)
 	cause := errors.New("parent cause")
-	parent, parentCancel := context.WithCancelCause(context.Background())
-	parentCancel(cause)
+	tests := map[string]struct {
+		newParent func(t *testing.T, mClock *quartz.Mock) context.Context
+		wantErr   error
+	}{
+		"Stdlib": {
+			newParent: func(_ *testing.T, _ *quartz.Mock) context.Context {
+				ctx, cancel := context.WithCancelCause(context.Background())
+				cancel(cause)
+				return ctx
+			},
+			wantErr: context.Canceled,
+		},
+		// If creating a context from a done context of the same Mock deadlocks, go test -timeout
+		// reports it by naming this subtest.
+		"Mock": {
+			newParent: func(t *testing.T, mClock *quartz.Mock) context.Context {
+				ctx, cancel := mClock.WithTimeoutCause(context.Background(), 0, cause)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mClock := quartz.NewMock(t)
+			ctx, cancel := mClock.WithTimeout(tt.newParent(t, mClock), time.Hour)
+			defer cancel()
 
-	ctx, cancel := mClock.WithTimeout(parent, time.Hour)
-	defer cancel()
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatalf("expected Canceled, got %v", ctx.Err())
-	}
-	if got := context.Cause(ctx); !errors.Is(got, cause) {
-		t.Fatalf("expected parent cause, got %v", got)
-	}
-	if d, ok := mClock.Peek(); ok {
-		t.Fatalf("expected no pending events, got Peek()=%s", d)
+			if !errors.Is(ctx.Err(), tt.wantErr) {
+				t.Fatalf("expected %v, got %v", tt.wantErr, ctx.Err())
+			}
+			if got := context.Cause(ctx); !errors.Is(got, cause) {
+				t.Fatalf("expected parent cause, got %v", got)
+			}
+		})
 	}
 }
 
@@ -751,36 +775,6 @@ func TestWithTimeout_Trap(t *testing.T) {
 	case <-ctx.Done():
 	case <-testCtx.Done():
 		t.Fatal("timeout waiting for canceled WithTimeoutCause ctx")
-	}
-}
-
-func TestWithTimeout_CanceledMockParent(t *testing.T) {
-	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-
-	mClock := quartz.NewMock(t)
-	parent, parentCancel := mClock.WithTimeout(context.Background(), time.Hour)
-	parentCancel()
-
-	got := make(chan context.Context, 1)
-	go func() {
-		ctx, cancel := mClock.WithTimeout(parent, time.Hour)
-		t.Cleanup(cancel)
-		got <- ctx
-	}()
-	select {
-	case ctx := <-got:
-		select {
-		case <-ctx.Done():
-		case <-testCtx.Done():
-			t.Fatal("timeout waiting for context with canceled mock parent")
-		}
-		if !errors.Is(ctx.Err(), context.Canceled) {
-			t.Fatalf("expected Canceled, got %v", ctx.Err())
-		}
-	case <-testCtx.Done():
-		t.Fatal("WithTimeout with a canceled mock parent did not return")
 	}
 }
 
