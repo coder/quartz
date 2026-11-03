@@ -439,32 +439,18 @@ existing unit tests.
 
 ## Quartz and `testing/synctest`
 
-Go 1.25 made [`testing/synctest`](https://pkg.go.dev/testing/synctest) stable. `synctest.Test` runs
-a test function in a "bubble" where the `time` package uses a fake clock. Bubble time advances only
-when every goroutine in the bubble is durably blocked: in a send, receive, or `select` on channels
-created in the bubble, in `time.Sleep`, in `sync.Cond.Wait`, or in `sync.WaitGroup.Wait` after `Add`
-was called in the bubble. A package-level `var wg sync.WaitGroup` cannot be associated with a
-bubble, so waiting on it does not count. `synctest.Wait` blocks until every other goroutine in the
-bubble is durably blocked. Go 1.27 adds `synctest.Sleep`, which calls `time.Sleep` and then
-`synctest.Wait`, and `httptest.NewTestServer`, which serves HTTP over an in-memory network that
-works in a bubble.
+Since Go 1.25, [`synctest.Test`](https://pkg.go.dev/testing/synctest) runs a test in a "bubble"
+whose fake clock moves forward when every goroutine in the bubble is
+[durably blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-dependent code:
 
-Which to use:
-
-- If every goroutine in the test starts in the bubble and blocks only in those ways, use `synctest`
-  with `quartz.NewReal()`. No `*Mock` is needed.
-- If the test does real network I/O, for example against a database, use a `*Mock` outside a
-  bubble. On Go 1.27, an HTTP test can instead create an `httptest.NewTestServer` inside the bubble
-  and send requests with its `Client()`. A server created outside the bubble crashes the test binary
-  with `fatal error: select on synctest channel from outside bubble`.
-- If you need traps, or want to move one clock without moving every timer in the bubble, use a
-  `*Mock`, inside or outside a bubble.
-
-### `NewReal()` in a bubble
-
-The real clock calls the `time` and `context` packages, so inside a bubble its `Now()`, timers,
-tickers, and contexts use bubble time. `ctx.Deadline()` and `time.Now()` both report bubble time, so
-the [`Deadline()` caveat](#deadline-reports-wall-time) for `*Mock` contexts does not apply.
+- If everything the test runs fits in a bubble, use `synctest` with `quartz.NewReal()`, which runs
+  on bubble time there. You need no `*Mock`, `Advance()`, or traps.
+- If the test does real I/O, such as database queries or requests over a real network, use a
+  `*Mock` outside a bubble, as in [Mocking](#mocking). Bubble time stops while a goroutine waits on
+  I/O. On Go 1.27, HTTP tests can stay in the bubble with an `httptest.NewTestServer` created there
+  and its `Client()`.
+- If you need traps or want to decide when time moves, use a `*Mock`, in a bubble or not. Bubble
+  time does not move it.
 
 ```go
 func TestTimeout(t *testing.T) {
@@ -472,8 +458,7 @@ func TestTimeout(t *testing.T) {
 		clk := quartz.NewReal()
 		ctx, cancel := clk.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
-
-		time.Sleep(time.Minute) // returns without waiting a wall-clock minute
+		time.Sleep(time.Minute) // moves bubble time; returns without waiting a wall-clock minute
 		synctest.Wait()
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			t.Fatal("expected deadline exceeded")
@@ -482,48 +467,13 @@ func TestTimeout(t *testing.T) {
 }
 ```
 
-### `*Mock` in a bubble
+Inside a bubble:
 
-A `*Mock` keeps its own time inside a bubble. Bubble time passing does not advance it, and
-`Advance()` does not move bubble time. Mock timers fire and mock contexts expire only when you
-advance the mock. Traps work as they do outside a bubble.
-
-Create the `*Mock` with the `t` that `synctest.Test` passes to your function:
-
-```go
-synctest.Test(t, func(t *testing.T) {
-	mClock := quartz.NewMock(t) // the bubble's t, not the outer test's t
-	...
-})
-```
-
-The `*Mock` registers cleanup functions on its `t`. Cleanup registered on the bubble's `t` runs
-inside the bubble. Cleanup registered on the outer `t` runs outside the bubble, where it can operate
-on channels created in the bubble and crash the test binary with
-`fatal error: close of synctest channel from outside bubble` or
-`fatal error: receive on synctest channel from outside bubble`. For example, this happens after any
-`NewTimer` fires, even if its channel was read, and for a mock context derived from `t.Context()`,
-even if it was canceled.
-
-A parent created inside a bubble with `context.WithTimeout` or `context.WithDeadline` runs on bubble
-time. If the test blocks on a mock context that it never advances, bubble time advances to the
-parent's deadline and the parent cancels the child without waiting in wall time.
-
-Inside a bubble, test timeouts such as `context.WithTimeout(context.Background(), 10*time.Second)`
-in the examples above also run on bubble time. A stuck test gets the timeout error without waiting
-10 seconds of wall time, but bubble time that passes for any other reason, such as `time.Sleep` in
-the test or real timers in the code under test, also counts toward the timeout. Make the timeout
-longer than all the bubble time the test lets pass. With a 10 second timeout,
-`time.Sleep(time.Hour)` leaves the timeout expired, and a later `mClock.Advance(...).MustWait(ctx)`
-or `trap.MustWait(ctx)` that has to wait fails the test.
-
-### What stops bubble time
-
-`synctest` does not count a goroutine blocked on network I/O, a system call, or a `sync.Mutex` as
-durably blocked, so bubble time does not advance while any goroutine in the bubble waits on one. In
-a bubble, a 10 millisecond `context.WithTimeout` does not cancel a 1 second query to a real
-PostgreSQL server. Run such tests outside a bubble with a `*Mock`: `Advance()` expires mock contexts
-while the query is in flight.
+- Create a `*Mock` with the `t` that `synctest.Test` passes in. With the outer test's `t`, its
+  cleanup runs outside the bubble and can crash the test binary with a fatal error such as
+  `close of synctest channel from outside bubble`.
+- Test timeouts created in a bubble, such as the `ctx` you pass to `MustWait`, run on bubble time.
+  Make them longer than all the bubble time the test lets pass, including `time.Sleep` calls.
 
 ## Why another time testing library?
 
