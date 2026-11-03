@@ -362,8 +362,8 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 	defer childCancel()
 	nested, nestedCancel := mClock.WithTimeout(ctx, time.Hour)
 	defer nestedCancel()
-	// Obtained before cancel so the check below does not trigger the nested context's own
-	// parent check.
+	// Obtained before cancel so the check below does not trigger the nested context's own parent
+	// check.
 	nestedDone := nested.Done()
 
 	cancel()
@@ -451,8 +451,8 @@ func TestWithTimeout_CancelIsIdempotentAndRemovesEvent(t *testing.T) {
 func TestWithTimeout_ParentCanceled(t *testing.T) {
 	t.Parallel()
 
-	// Each subtest observes the parent's cancellation through one path only, because every
-	// path also cancels the mock context and would hide a gap in the others.
+	// Each subtest observes the parent's cancellation through one path only, because every path
+	// also cancels the mock context and would hide a gap in the others.
 	observe := map[string]func(t *testing.T, mClock *quartz.Mock, ctx context.Context){
 		"Err": func(t *testing.T, _ *quartz.Mock, ctx context.Context) {
 			if !errors.Is(ctx.Err(), context.Canceled) {

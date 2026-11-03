@@ -329,10 +329,10 @@ if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 ```
 
 Contexts created through `mClock.WithDeadline` and `mClock.WithTimeout` expire when mock time
-reaches the deadline. `ctx.Deadline()` does not report that time; see below. Parent
-contexts keep standard `context` behavior. A parent created with `context.WithDeadline` or
-`context.WithTimeout` can still cancel the child on wall time because Quartz does not convert
-parent deadlines to mock time.
+reaches the deadline. `ctx.Deadline()` does not report that time; see below. Parent contexts keep
+standard `context` behavior. A parent created with `context.WithDeadline` or `context.WithTimeout`
+can still cancel the child on wall time because Quartz does not convert parent deadlines to mock
+time.
 
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
@@ -345,8 +345,8 @@ compares it with `time.Now()` or passes it to wall-clock APIs such as `net.Diale
 `net.Conn.SetDeadline`, `http.Client`, and gRPC. Those would treat a mock deadline as already
 expired.
 
-Code that needs the remaining mock time must compute it from the deadline or timeout it passed
-in, not from `ctx.Deadline()`.
+Code that needs the remaining mock time must compute it from the deadline or timeout it passed in,
+not from `ctx.Deadline()`.
 
 ## Recommended Patterns
 

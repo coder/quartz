@@ -181,8 +181,8 @@ func (m *Mock) WithTimeoutCause(parent context.Context, d time.Duration, cause e
 // newMockCtx creates the context for call. deadlineLocked is evaluated with m.mu held after any
 // traps release the call.
 func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, deadlineLocked func() time.Time) (context.Context, context.CancelFunc) {
-	// inner holds values and the cancellation cause. It does not inherit parent's cancellation,
-	// so only cancel() decides which error and cause the context reports.
+	// inner holds values and the cancellation cause. It does not inherit parent's cancellation, so
+	// only cancel() decides which error and cause the context reports.
 	inner, innerCancel := context.WithCancelCause(context.WithoutCancel(parent))
 	wallDeadline, ok := parent.Deadline()
 	if !ok {
@@ -233,8 +233,8 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	return c, func() { c.cancel(context.Canceled, nil) }
 }
 
-// checkDoneContexts cancels contexts whose parents are done, so their pending events do not
-// block Advance or show up in Peek.
+// checkDoneContexts cancels contexts whose parents are done, so their pending events do not block
+// Advance or show up in Peek.
 func (m *Mock) checkDoneContexts() {
 	m.mu.Lock()
 	var ctxs []*mockCtx
@@ -731,20 +731,19 @@ type afterFunc struct{ f func() }
 
 // noWallDeadline is what Deadline() reports for a mock context whose parent has no deadline.
 //
-// Code that reads ctx.Deadline() compares it with time.Now() or hands it to wall-clock APIs
-// such as net.Dialer, net.Conn.SetDeadline, http.Client, gRPC, and x/time/rate. Mock time is
-// unrelated to wall time, so reporting the mock deadline makes those consumers see an expired
-// deadline, and converting it to wall time would make a mock timeout expire real I/O. Reporting
-// the parent's deadline, or a deadline that never arrives, keeps ok == true for code that
-// requires a deadline while leaving expiry to Done() and Err(), which follow mock time.
+// Code that reads ctx.Deadline() compares it with time.Now() or hands it to wall-clock APIs such as
+// net.Dialer, net.Conn.SetDeadline, http.Client, gRPC, and x/time/rate. Mock time is unrelated to
+// wall time, so reporting the mock deadline makes those consumers see an expired deadline, and
+// converting it to wall time would make a mock timeout expire real I/O. Reporting the parent's
+// deadline, or a deadline that never arrives, keeps ok == true for code that requires a deadline
+// while leaving expiry to Done() and Err(), which follow mock time.
 var noWallDeadline = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
-// AfterFunc lets stdlib contexts created directly from c register for cancellation instead of
-// each starting a goroutine that waits on Done (see context.afterFuncer). Registered functions
-// run before fire or the cancel function returns, so those contexts are done by the time
+// AfterFunc lets stdlib contexts created directly from c register for cancellation instead of each
+// starting a goroutine that waits on Done (see context.afterFuncer). Registered functions run
+// before fire or the cancel function returns, so those contexts are done by the time
 // Advance().MustWait() or cancel() returns. Contexts derived through another layer, such as
-// context.WithValue, still use a goroutine because the context package does not forward
-// AfterFunc.
+// context.WithValue, still use a goroutine because the context package does not forward AfterFunc.
 func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
 	c.mock.mu.Lock()
 	defer c.mock.mu.Unlock()
@@ -772,10 +771,10 @@ func (c *mockCtx) Deadline() (time.Time, bool) {
 	return c.wallDeadline, true
 }
 
-// Done, Err, and Value check the parent first because context.AfterFunc reports parent
-// cancellation asynchronously, and stdlib contexts are done as soon as their parent is. Value
-// is included because context.Cause reads the cause through it. A Done channel obtained before
-// the parent was canceled closes when the context.AfterFunc goroutine runs.
+// Done, Err, and Value check the parent first because context.AfterFunc reports parent cancellation
+// asynchronously, and stdlib contexts are done as soon as their parent is. Value is included
+// because context.Cause reads the cause through it. A Done channel obtained before the parent was
+// canceled closes when the context.AfterFunc goroutine runs.
 func (c *mockCtx) Done() <-chan struct{} {
 	c.checkParent()
 	return c.done
@@ -808,11 +807,11 @@ func (c *mockCtx) checkParent() {
 	}
 }
 
-// cancel matches stdlib cancelCtx.cancel(): a nil cause defaults to err. If the parent is
-// already done, its error and cause win, as they do when stdlib propagates cancellation.
+// cancel matches stdlib cancelCtx.cancel(): a nil cause defaults to err. If the parent is already
+// done, its error and cause win, as they do when stdlib propagates cancellation.
 //
-// Must be called without mock.mu held, because parent.Err() takes mock.mu when parent is a
-// context from this Mock.
+// Must be called without mock.mu held, because parent.Err() takes mock.mu when parent is a context
+// from this Mock.
 func (c *mockCtx) cancel(err, cause error) {
 	if perr := c.parent.Err(); perr != nil {
 		err, cause = perr, context.Cause(c.parent)
