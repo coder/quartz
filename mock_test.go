@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime/pprof"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -496,6 +497,56 @@ func tRunFail(t testing.TB, f func(t testing.TB)) {
 	}
 }
 
+// cleanupTB is a quartz.TestingT that records Cleanup registrations so that a test can run them
+// before it ends. Like testing.T, it never calls functions registered after its cleanups have run.
+type cleanupTB struct {
+	testing.TB
+
+	mu         sync.Mutex
+	registered int
+	cleanups   []func()
+	finished   bool
+}
+
+func newCleanupTB(t *testing.T) *cleanupTB {
+	tb := &cleanupTB{TB: t}
+	t.Cleanup(tb.runCleanups)
+	return tb
+}
+
+func (c *cleanupTB) Cleanup(f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.registered++
+	if !c.finished {
+		c.cleanups = append(c.cleanups, f)
+	}
+}
+
+// registrations returns the number of Cleanup calls so far.
+func (c *cleanupTB) registrations() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.registered
+}
+
+// runCleanups calls the registered functions in last added, first called order, including
+// functions registered while it runs, as testing.T does when a test ends.
+func (c *cleanupTB) runCleanups() {
+	for {
+		c.mu.Lock()
+		if len(c.cleanups) == 0 {
+			c.finished = true
+			c.mu.Unlock()
+			return
+		}
+		f := c.cleanups[len(c.cleanups)-1]
+		c.cleanups = c.cleanups[:len(c.cleanups)-1]
+		c.mu.Unlock()
+		f()
+	}
+}
+
 type testLogger struct {
 	calls []string
 }
@@ -601,6 +652,125 @@ func TestNoLeak_Go123(t *testing.T) {
 	_ = mClock.NewTimer(1 * time.Second)
 	_ = mClock.NewTicker(1 * time.Second)
 	mClock.Advance(1 * time.Second).MustWait(ctx)
+}
+
+// TestTimer_FireRegistersNoCleanup verifies that firing a channel timer does not register a test
+// cleanup, so the cleanup list does not grow with the number of fires.
+func TestTimer_FireRegistersNoCleanup(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tb := newCleanupTB(t)
+	mClock := quartz.NewMock(tb).WithLogger(quartz.NoOpLogger)
+	tmr := mClock.NewTimer(time.Second)
+	before := tb.registrations()
+	const fires = 100
+	for i := 0; i < fires; i++ {
+		mClock.Advance(time.Second).MustWait(ctx)
+		tmr.Reset(time.Second)
+	}
+	if got := tb.registrations() - before; got != 0 {
+		t.Fatalf("expected %d timer fires to register no cleanups, got %d", fires, got)
+	}
+}
+
+// TestTimer_AbandonedAdvance verifies that the goroutine writing a fired timer's value to C exits
+// when the test ends. A test can stop waiting on an Advance, for example when MustWait fails, so
+// the timer can fire before or after the test's cleanups run. Calling Advance after running the
+// cleanups makes the second ordering deterministic.
+func TestTimer_AbandonedAdvance(t *testing.T) {
+	t.Parallel()
+
+	t.Run("FiredBeforeCleanup", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		tb := newCleanupTB(t)
+		mClock := quartz.NewMock(tb)
+		_ = mClock.NewTimer(time.Second)
+		labeledAdvance(ctx, t.Name(), mClock, time.Second).MustWait(ctx)
+		// Only the goroutine blocked writing to the unread timer channel remains.
+		waitLabeledGoroutines(ctx, t, t.Name(), 1)
+
+		tb.runCleanups()
+		waitLabeledGoroutines(ctx, t, t.Name(), 0)
+	})
+
+	t.Run("FiredAfterCleanup", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		tb := newCleanupTB(t)
+		mClock := quartz.NewMock(tb)
+		_ = mClock.NewTimer(time.Second)
+
+		tb.runCleanups()
+		labeledAdvance(ctx, t.Name(), mClock, time.Second).MustWait(ctx)
+		waitLabeledGoroutines(ctx, t, t.Name(), 0)
+	})
+}
+
+// goroutineLabelKey is the pprof label key that labeledAdvance sets.
+const goroutineLabelKey = "quartz_test"
+
+// labeledAdvance calls mClock.Advance with the pprof label goroutineLabelKey set to label.
+// Goroutines inherit labels from the goroutine that starts them, so every goroutine that the
+// Advance starts, directly or indirectly, carries the label.
+func labeledAdvance(
+	ctx context.Context, label string, mClock *quartz.Mock, d time.Duration,
+) quartz.AdvanceWaiter {
+	var w quartz.AdvanceWaiter
+	pprof.Do(ctx, pprof.Labels(goroutineLabelKey, label), func(context.Context) {
+		w = mClock.Advance(d)
+	})
+	return w
+}
+
+// waitLabeledGoroutines waits until exactly want goroutines carry the label set by
+// labeledAdvance, and fails the test if ctx expires first.
+func waitLabeledGoroutines(ctx context.Context, t testing.TB, label string, want int) {
+	t.Helper()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		got, stacks := labeledGoroutines(label)
+		if got == want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("expected %d goroutines labeled %q, got %d:\n%s", want, label, got, stacks)
+		case <-poll.C:
+		}
+	}
+}
+
+// labeledGoroutines returns the number of goroutines that carry the label set by labeledAdvance,
+// and their stacks.
+func labeledGoroutines(label string) (int, string) {
+	var buf bytes.Buffer
+	_ = pprof.Lookup("goroutine").WriteTo(&buf, 1)
+	// The first line is the profile header. Each record that follows starts with
+	// "<count> @ <addresses>" and lists its labels on a "# labels: " line.
+	_, body, _ := strings.Cut(buf.String(), "\n")
+	labelText := fmt.Sprintf("%q:%q", goroutineLabelKey, label)
+	var total int
+	var stacks []string
+	for _, record := range strings.Split(body, "\n\n") {
+		if !strings.Contains(record, labelText) {
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(record, "%d @", &n); err != nil {
+			panic(fmt.Sprintf("parse goroutine profile record %q: %v", record, err))
+		}
+		total += n
+		stacks = append(stacks, record)
+	}
+	return total, strings.Join(stacks, "\n\n")
 }
 
 func TestTickerStop_Go123(t *testing.T) {

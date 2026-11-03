@@ -30,6 +30,10 @@ type Mock struct {
 	logger   Logger
 	mu       sync.Mutex
 	testOver bool
+	// done is closed by the cleanup registered in NewMock, which ends all pending timer channel
+	// writes. Timers can fire after the test's cleanups have run, so a cleanup registered by the
+	// fire itself would never run.
+	done chan struct{}
 
 	// cur is the current time
 	cur time.Time
@@ -489,11 +493,13 @@ func NewMock(tb TestingT) *Mock {
 		tb:     tb,
 		logger: tb,
 		cur:    cur,
+		done:   make(chan struct{}),
 	}
 	tb.Cleanup(func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.testOver = true
+		close(m.done)
 		m.logger.Logf("Mock Clock - test cleanup; will no longer log clock events")
 	})
 	return m

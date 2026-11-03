@@ -26,7 +26,8 @@ type Timer struct {
 	// They also are not supposed to leak even if they are never read or stopped (Go runtime can garbage collect them).
 	// We can't garbage-collect because we can't check if any other code besides the mock references, but we can ensure
 	// that we don't leak goroutines so that the garbage collector can do its job when the mock is no longer
-	// referenced. The channels below allow us to interrupt the channel write goroutine.
+	// referenced. interrupt lets Stop and Reset interrupt the channel write goroutine, and
+	// mock.done interrupts it when the test ends.
 	interrupt chan struct{}
 }
 
@@ -38,12 +39,14 @@ func (t *Timer) fire(tt time.Time) {
 		t.fn()
 		return
 	} else {
+		// Timer channel writes are abandoned when the test ends, so that the write goroutine does
+		// not leak beyond the test. Side effect is that timer channels cannot be read after the
+		// test exits.
+		if t.mock.testOver {
+			t.mock.mu.Unlock()
+			return
+		}
 		interrupt := make(chan struct{})
-		// Prevents the goroutine from leaking beyond the test. Side effect is that timer channels cannot be read
-		// after the test exits.
-		t.mock.tb.Cleanup(func() {
-			<-interrupt
-		})
 		t.interrupt = interrupt
 		t.mock.mu.Unlock()
 		go func() {
@@ -51,6 +54,7 @@ func (t *Timer) fire(tt time.Time) {
 			select {
 			case t.c <- tt:
 			case interrupt <- struct{}{}:
+			case <-t.mock.done:
 			}
 		}()
 	}
