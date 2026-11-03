@@ -450,8 +450,8 @@ whose fake clock moves forward when every goroutine in the bubble is
   `*Mock` outside a bubble, as in [Mocking](#mocking). Bubble time stops while a goroutine waits on
   I/O, so a timeout does not stop a slow query or request. With `go 1.27` or later in `go.mod`, HTTP
   tests can stay in the bubble with an `httptest.NewTestServer` created there and its `Client()`.
-- If you need traps or want to decide when time moves, use a `*Mock`, in a bubble or not. Bubble
-  time does not move it.
+- If you need traps or want to decide when time moves, use a `*Mock`, in a bubble or not. A `*Mock`
+  ignores bubble time; only `Advance()`, `AdvanceNext()`, and `Set()` move it.
 
 ```go
 func TestTimeout(t *testing.T) {
