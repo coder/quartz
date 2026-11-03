@@ -1225,8 +1225,14 @@ func TestWithTimeout_TestEndCancelsLiveContexts(t *testing.T) {
 			t.Errorf("expected live context cause ErrMockClockTestEnded, got %v", context.Cause(live))
 		}
 		// Contexts that were done before the test ended keep their error and cause.
+		if !errors.Is(canceled.Err(), context.Canceled) {
+			t.Errorf("expected canceled context Canceled, got %v", canceled.Err())
+		}
 		if !errors.Is(context.Cause(canceled), context.Canceled) {
 			t.Errorf("expected canceled context cause Canceled, got %v", context.Cause(canceled))
+		}
+		if !errors.Is(expired.Err(), context.DeadlineExceeded) {
+			t.Errorf("expected expired context DeadlineExceeded, got %v", expired.Err())
 		}
 		if !errors.Is(context.Cause(expired), context.DeadlineExceeded) {
 			t.Errorf("expected expired context cause DeadlineExceeded, got %v", context.Cause(expired))
