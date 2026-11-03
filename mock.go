@@ -697,7 +697,7 @@ type mockTickerFunc struct {
 	done bool
 	// err holds the error when the ticker exits
 	err error
-
+	// src is the mock call that created the ticker
 	src eventSource
 }
 
