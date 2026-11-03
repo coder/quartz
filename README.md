@@ -503,9 +503,15 @@ even if it was canceled.
 
 A parent created inside a bubble with `context.WithTimeout` or `context.WithDeadline` runs on bubble
 time. If the test blocks on a mock context that it never advances, bubble time advances to the
-parent's deadline and the parent cancels the child without waiting in wall time. Test timeouts such
-as `context.WithTimeout(context.Background(), 10*time.Second)` in the examples above behave the same
-way: a stuck test inside a bubble gets the timeout error without waiting 10 seconds.
+parent's deadline and the parent cancels the child without waiting in wall time.
+
+Inside a bubble, test timeouts such as `context.WithTimeout(context.Background(), 10*time.Second)`
+in the examples above also run on bubble time. A stuck test gets the timeout error without waiting
+10 seconds of wall time, but bubble time that passes for any other reason, such as `time.Sleep` in
+the test or real timers in the code under test, also counts toward the timeout. Make the timeout
+longer than all the bubble time the test lets pass. With a 10 second timeout and a mock timer due in
+an hour, `time.Sleep(time.Hour)` followed by `mClock.Advance(time.Hour).MustWait(ctx)` fails with
+`context expired while waiting for clock to advance`.
 
 ### What stops bubble time
 
