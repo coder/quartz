@@ -24,8 +24,9 @@ func (*collectSentinel) Error() string { return "collect sentinel" }
 func TestWithTimeout_DoneContextIsCollectable(t *testing.T) {
 	t.Parallel()
 
-	// Each case ends a context whose cause is the returned sentinel. The Mock stays reachable
-	// through the cleanup that NewMock registers on t.
+	// Each case ends a context whose cause is the returned sentinel. The Mock and the context's own
+	// test-end cleanup stay reachable through t, so each case checks that neither keeps the
+	// context.
 	tests := map[string]func(t *testing.T) weak.Pointer[collectSentinel]{
 		"Canceled": func(t *testing.T) weak.Pointer[collectSentinel] {
 			mClock := quartz.NewMock(t)
