@@ -441,16 +441,18 @@ existing unit tests.
 
 Go 1.25 made [`testing/synctest`](https://pkg.go.dev/testing/synctest) stable. `synctest.Test` runs
 a test function in a "bubble" where the `time` package uses a fake clock. Bubble time advances only
-when every goroutine in the bubble is durably blocked, for example on a channel created in the
-bubble or in `time.Sleep`. `synctest.Wait` blocks until every other goroutine in the bubble is
-durably blocked. Go 1.27 adds `synctest.Sleep`, which calls `time.Sleep` and then `synctest.Wait`,
-and `httptest.NewTestServer`, which serves HTTP over an in-memory network that works in a bubble.
+when every goroutine in the bubble is durably blocked: in a send, receive, or `select` on channels
+created in the bubble, in `time.Sleep`, in `sync.Cond.Wait`, or in `sync.WaitGroup.Wait` after `Add`
+was called in the bubble. A package-level `var wg sync.WaitGroup` cannot be associated with a
+bubble, so waiting on it does not count. `synctest.Wait` blocks until every other goroutine in the
+bubble is durably blocked. Go 1.27 adds `synctest.Sleep`, which calls `time.Sleep` and then
+`synctest.Wait`, and `httptest.NewTestServer`, which serves HTTP over an in-memory network that
+works in a bubble.
 
 Which to use:
 
-- If every goroutine in the test starts in the bubble and blocks only on channels created in the
-  bubble, `time.Sleep`, `sync.WaitGroup`, or `sync.Cond`, use `synctest` with `quartz.NewReal()`. No
-  `*Mock` is needed.
+- If every goroutine in the test starts in the bubble and blocks only in those ways, use `synctest`
+  with `quartz.NewReal()`. No `*Mock` is needed.
 - If the test does real network I/O, for example against a database, use a `*Mock` outside a
   bubble. On Go 1.27, an HTTP test can instead serve with `httptest.NewTestServer`, send requests
   with its `Client()`, and stay in the bubble.
