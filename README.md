@@ -512,9 +512,9 @@ Inside a bubble, test timeouts such as `context.WithTimeout(context.Background()
 in the examples above also run on bubble time. A stuck test gets the timeout error without waiting
 10 seconds of wall time, but bubble time that passes for any other reason, such as `time.Sleep` in
 the test or real timers in the code under test, also counts toward the timeout. Make the timeout
-longer than all the bubble time the test lets pass. With a 10 second timeout and a mock timer due in
-an hour, `time.Sleep(time.Hour)` followed by `mClock.Advance(time.Hour).MustWait(ctx)` fails with
-`context expired while waiting for clock to advance`.
+longer than all the bubble time the test lets pass. With a 10 second timeout,
+`time.Sleep(time.Hour)` leaves the timeout expired, and a later `mClock.Advance(...).MustWait(ctx)`
+or `trap.MustWait(ctx)` that has to wait fails the test.
 
 ### What stops bubble time
 
