@@ -325,6 +325,20 @@ func TestTickerFunc_LongCallback(t *testing.T) {
 	w.MustWait(testCtx)
 }
 
+// TestTickerFunc_MockContextCanceled tests that TickerFunc exits when its context, created by the
+// same Mock, is canceled. If it deadlocks, go test -timeout reports it by naming this test.
+func TestTickerFunc_MockContextCanceled(t *testing.T) {
+	t.Parallel()
+	mClock := quartz.NewMock(t)
+
+	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+	w := mClock.TickerFunc(ctx, time.Second, func() error { return nil })
+	cancel()
+	if err := w.Wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected Canceled, got %v", err)
+	}
+}
+
 func TestWithTimeout_FiresOnAdvance(t *testing.T) {
 	t.Parallel()
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -775,28 +789,6 @@ func TestWithTimeout_Trap(t *testing.T) {
 	case <-ctx.Done():
 	case <-testCtx.Done():
 		t.Fatal("timeout waiting for canceled WithTimeoutCause ctx")
-	}
-}
-
-func TestTickerFunc_MockContext(t *testing.T) {
-	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-
-	mClock := quartz.NewMock(t)
-	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
-	w := mClock.TickerFunc(ctx, time.Second, func() error { return nil })
-	cancel()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- w.Wait() }()
-	select {
-	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected Canceled, got %v", err)
-		}
-	case <-testCtx.Done():
-		t.Fatal("TickerFunc did not exit after its mock context was canceled")
 	}
 }
 
