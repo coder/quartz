@@ -473,7 +473,8 @@ Inside a bubble:
   cleanup runs outside the bubble and can crash the test binary with a fatal error such as
   `close of synctest channel from outside bubble`.
 - Test timeouts created in a bubble, such as the `ctx` you pass to `MustWait`, run on bubble time.
-  Make them longer than all the bubble time the test lets pass, including `time.Sleep` calls.
+  Make them longer than the bubble time that passes while they are in use, including `time.Sleep`
+  calls. A long timeout costs no wall time, because a stuck test reaches it immediately.
 
 ## Why another time testing library?
 
