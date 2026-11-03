@@ -483,6 +483,9 @@ func (m *Mock) WithLogger(l Logger) *Mock {
 // NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
 // You may re-set the time earlier than this, but only before timers or tickers
 // are created.
+//
+// A timer value that has not been received when the cleanup registered by NewMock runs is dropped.
+// Call NewMock before registering cleanups that wait for code reading the Mock's timers.
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {
