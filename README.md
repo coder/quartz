@@ -460,7 +460,7 @@ func TestTimeout(t *testing.T) {
 		ctx, cancel := clk.WithTimeout(t.Context(), time.Minute)
 		defer cancel()
 		time.Sleep(time.Minute) // moves bubble time; returns without waiting a wall-clock minute
-		synctest.Wait()
+		synctest.Wait()         // let the context's timer callback mark ctx done
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			t.Fatal("expected deadline exceeded")
 		}
