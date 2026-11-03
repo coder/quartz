@@ -184,13 +184,18 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	// inner holds values and the cancellation cause. It does not inherit parent's cancellation,
 	// so only cancel() decides which error and cause the context reports.
 	inner, innerCancel := context.WithCancelCause(context.WithoutCancel(parent))
+	wallDeadline, ok := parent.Deadline()
+	if !ok {
+		wallDeadline = noWallDeadline
+	}
 	c := &mockCtx{
-		parent:      parent,
-		inner:       inner,
-		innerCancel: innerCancel,
-		cause:       cause,
-		mock:        m,
-		done:        make(chan struct{}),
+		parent:       parent,
+		inner:        inner,
+		innerCancel:  innerCancel,
+		wallDeadline: wallDeadline,
+		cause:        cause,
+		mock:         m,
+		done:         make(chan struct{}),
 	}
 
 	m.mu.Lock()
@@ -706,7 +711,10 @@ type mockCtx struct {
 	// fire instead of ours.
 	inner       context.Context
 	innerCancel context.CancelCauseFunc
-	deadline    time.Time
+	// deadline is in mock time and schedules the event.
+	deadline time.Time
+	// wallDeadline is what Deadline() reports; see noWallDeadline.
+	wallDeadline time.Time
 
 	// Cause recorded when the deadline fires.
 	cause error
@@ -720,6 +728,16 @@ type mockCtx struct {
 }
 
 type afterFunc struct{ f func() }
+
+// noWallDeadline is what Deadline() reports for a mock context whose parent has no deadline.
+//
+// Code that reads ctx.Deadline() compares it with time.Now() or hands it to wall-clock APIs
+// such as net.Dialer, net.Conn.SetDeadline, http.Client, gRPC, and x/time/rate. Mock time is
+// unrelated to wall time, so reporting the mock deadline makes those consumers see an expired
+// deadline, and converting it to wall time would make a mock timeout expire real I/O. Reporting
+// the parent's deadline, or a deadline that never arrives, keeps ok == true for code that
+// requires a deadline while leaving expiry to Done() and Err(), which follow mock time.
+var noWallDeadline = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 // AfterFunc lets stdlib contexts derived from c register for cancellation instead of each
 // starting a goroutine that waits on Done (see context.afterFuncer). Registered functions run
@@ -750,7 +768,7 @@ func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
 }
 
 func (c *mockCtx) Deadline() (time.Time, bool) {
-	return c.deadline, true
+	return c.wallDeadline, true
 }
 
 // Done and Err check the parent first because context.AfterFunc reports parent cancellation

@@ -380,18 +380,44 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 func TestWithDeadline_Deadline(t *testing.T) {
 	t.Parallel()
 
-	mClock := quartz.NewMock(t)
-	deadline := mClock.Now().Add(time.Hour)
-	ctx, cancel := mClock.WithDeadline(context.Background(), deadline)
-	defer cancel()
+	t.Run("NoParentDeadline", func(t *testing.T) {
+		t.Parallel()
+		mClock := quartz.NewMock(t)
+		ctx, cancel := mClock.WithDeadline(context.Background(), mClock.Now().Add(time.Hour))
+		defer cancel()
 
-	got, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("expected deadline")
-	}
-	if !got.Equal(deadline) {
-		t.Fatalf("expected deadline %s, got %s", deadline, got)
-	}
+		// Code that requires a deadline still finds one, and it is in the wall-clock future.
+		got, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("expected deadline")
+		}
+		if got.Year() != 9999 {
+			t.Fatalf("expected deadline in year 9999, got %s", got)
+		}
+
+		// A stdlib timeout derived from the mock context keeps its own wall-clock deadline.
+		child, childCancel := context.WithTimeout(ctx, time.Minute)
+		defer childCancel()
+		childDeadline, _ := child.Deadline()
+		if !childDeadline.After(time.Now()) {
+			t.Fatalf("expected child deadline in the future, got %s", childDeadline)
+		}
+	})
+
+	t.Run("ParentDeadline", func(t *testing.T) {
+		t.Parallel()
+		mClock := quartz.NewMock(t)
+		parent, parentCancel := context.WithTimeout(context.Background(), time.Hour)
+		defer parentCancel()
+		want, _ := parent.Deadline()
+		ctx, cancel := mClock.WithDeadline(parent, mClock.Now().Add(time.Minute))
+		defer cancel()
+
+		got, ok := ctx.Deadline()
+		if !ok || !got.Equal(want) {
+			t.Fatalf("expected parent deadline %s, got %s, %v", want, got, ok)
+		}
+	})
 }
 
 func TestWithTimeout_CancelIsIdempotentAndRemovesEvent(t *testing.T) {
