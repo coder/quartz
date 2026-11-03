@@ -181,44 +181,60 @@ func (m *Mock) WithTimeoutCause(parent context.Context, d time.Duration, cause e
 // newMockCtx creates the context for call. deadlineLocked is evaluated with m.mu held after any
 // traps release the call.
 func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, deadlineLocked func() time.Time) (context.Context, context.CancelFunc) {
-	// Created before taking m.mu: WithCancelCause calls parent.Err(), which takes m.mu when
-	// parent is a context from this Mock.
-	inner, innerCancel := context.WithCancelCause(parent)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.matchCallLocked(call)
-	defer close(call.complete)
-	d := deadlineLocked()
+	// inner holds values and the cancellation cause. It does not inherit parent's cancellation,
+	// so only cancel() decides which error and cause the context reports.
+	inner, innerCancel := context.WithCancelCause(context.WithoutCancel(parent))
 	c := &mockCtx{
+		parent:      parent,
 		inner:       inner,
 		innerCancel: innerCancel,
-		deadline:    d,
 		cause:       cause,
 		mock:        m,
 		done:        make(chan struct{}),
 	}
-	if !d.After(m.cur) {
-		// Past deadline: fire immediately, as NewTimer() does with d <= 0.
-		go c.fire(m.cur)
-	} else {
+
+	m.mu.Lock()
+	m.matchCallLocked(call)
+	c.deadline = deadlineLocked()
+	pastDeadline := !c.deadline.After(m.cur)
+	if !pastDeadline {
 		m.addEventLocked(c)
 	}
-	context.AfterFunc(inner, func() {
-		// inner.Err() is non-nil per AfterFunc() contract.
-		c.mock.mu.Lock()
-		defer c.mock.mu.Unlock()
-		c.cancelLocked(inner.Err(), nil)
-	})
-	m.tb.Cleanup(func() {
-		c.mock.mu.Lock()
-		defer c.mock.mu.Unlock()
-		c.cancelLocked(context.Canceled, ErrMockClockTestEnded)
-	})
-	return c, func() {
-		c.mock.mu.Lock()
-		defer c.mock.mu.Unlock()
-		c.cancelLocked(context.Canceled, nil)
+	m.tb.Cleanup(func() { c.cancel(context.Canceled, ErrMockClockTestEnded) })
+	close(call.complete)
+	m.mu.Unlock()
+
+	// Outside m.mu: cancel() calls parent.Err(), which takes m.mu when parent is a context from
+	// this Mock.
+	if pastDeadline {
+		c.cancel(context.DeadlineExceeded, cause)
+	} else {
+		c.checkParent()
+	}
+	stop := context.AfterFunc(parent, c.checkParent)
+	c.mock.mu.Lock()
+	c.stopParent = stop
+	done := c.err != nil
+	c.mock.mu.Unlock()
+	if done {
+		stop()
+	}
+	return c, func() { c.cancel(context.Canceled, nil) }
+}
+
+// checkDoneContexts cancels contexts whose parents are done, so their pending events do not
+// block Advance or show up in Peek.
+func (m *Mock) checkDoneContexts() {
+	m.mu.Lock()
+	var ctxs []*mockCtx
+	for _, e := range m.all {
+		if c, ok := e.(*mockCtx); ok {
+			ctxs = append(ctxs, c)
+		}
+	}
+	m.mu.Unlock()
+	for _, c := range ctxs {
+		c.checkParent()
 	}
 }
 
@@ -338,6 +354,7 @@ func (w AdvanceWaiter) Done() <-chan struct{} {
 func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
+	m.checkDoneContexts()
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - Advance(%s)", d)
@@ -388,6 +405,7 @@ func (m *Mock) advanceLocked(w AdvanceWaiter) {
 func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
+	m.checkDoneContexts()
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - Set(%s)", t)
@@ -427,6 +445,7 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 // none scheduled.  It returns the duration the clock was advanced and a waiter that can be used to
 // wait for the timer/tick event(s) to finish.
 func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
+	m.checkDoneContexts()
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - AdvanceNext()")
@@ -449,6 +468,7 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 // true, or, if there are no running tickers or timers, it returns zero and
 // false.
 func (m *Mock) Peek() (d time.Duration, ok bool) {
+	m.checkDoneContexts()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.nextTime.IsZero() {
@@ -670,7 +690,8 @@ func (m *mockTickerFunc) Wait(tags ...string) error {
 var _ Waiter = &mockTickerFunc{}
 
 type mockCtx struct {
-	mock *Mock
+	mock   *Mock
+	parent context.Context
 
 	// inner stores the cancellation cause so context.Cause() can find it via
 	// Value(&cancelCtxKey). Done() must NOT return inner.Done(): stdlib's
@@ -684,16 +705,20 @@ type mockCtx struct {
 	// Cause recorded when the deadline fires.
 	cause error
 
-	// err and done are written together under mock.mu.
-	err  error
-	done chan struct{}
+	// err, done, and stopParent are guarded by mock.mu. err and done are written together.
+	err        error
+	done       chan struct{}
+	stopParent func() bool
 }
 
 func (c *mockCtx) Deadline() (time.Time, bool) {
 	return c.deadline, true
 }
 
+// Done and Err check the parent first because context.AfterFunc reports parent cancellation
+// asynchronously, and stdlib contexts are done as soon as their parent is.
 func (c *mockCtx) Done() <-chan struct{} {
+	c.checkParent()
 	return c.done
 }
 
@@ -702,6 +727,7 @@ func (c *mockCtx) Value(key any) any {
 }
 
 func (c *mockCtx) Err() error {
+	c.checkParent()
 	c.mock.mu.Lock()
 	defer c.mock.mu.Unlock()
 	return c.err
@@ -712,25 +738,42 @@ func (c *mockCtx) next() time.Time {
 }
 
 func (c *mockCtx) fire(_ time.Time) {
-	c.mock.mu.Lock()
-	defer c.mock.mu.Unlock()
-	c.cancelLocked(context.DeadlineExceeded, c.cause)
+	c.cancel(context.DeadlineExceeded, c.cause)
 }
 
-// cancelLocked matches stdlib cancelCtx.cancel(): a nil cause defaults to err.
+// checkParent cancels c if its parent is done.
+func (c *mockCtx) checkParent() {
+	if c.parent.Err() != nil {
+		c.cancel(context.Canceled, nil)
+	}
+}
+
+// cancel matches stdlib cancelCtx.cancel(): a nil cause defaults to err. If the parent is
+// already done, its error and cause win, as they do when stdlib propagates cancellation.
 //
-// Must be called with mock.mu held.
-func (c *mockCtx) cancelLocked(err, cause error) {
-	if c.err != nil {
-		return
+// Must be called without mock.mu held, because parent.Err() takes mock.mu when parent is a
+// context from this Mock.
+func (c *mockCtx) cancel(err, cause error) {
+	if perr := c.parent.Err(); perr != nil {
+		err, cause = perr, context.Cause(c.parent)
 	}
 	if cause == nil {
 		cause = err
+	}
+	c.mock.mu.Lock()
+	if c.err != nil {
+		c.mock.mu.Unlock()
+		return
 	}
 	c.err = err
 	c.mock.removeEventLocked(c)
 	c.innerCancel(cause)
 	close(c.done)
+	stop := c.stopParent
+	c.mock.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
 }
 
 type clockFunction int

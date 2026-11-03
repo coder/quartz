@@ -410,18 +410,63 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 	ctx, cancel := mClock.WithTimeout(parent, time.Hour)
 	defer cancel()
 
+	// As with stdlib contexts, the child is done as soon as parentCancel returns.
 	parentCancel()
-	select {
-	case <-ctx.Done():
-		// OK
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for parent cancellation")
-	}
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		t.Fatalf("expected Canceled, got %v", ctx.Err())
 	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("expected Done to be closed")
+	}
 	if d, ok := mClock.Peek(); ok {
 		t.Fatalf("expected no pending events, got Peek()=%s", d)
+	}
+	// The canceled context must not block advancing past its old deadline.
+	mClock.Advance(2 * time.Hour).MustWait(testCtx)
+}
+
+func TestWithTimeout_ParentAlreadyCanceled(t *testing.T) {
+	t.Parallel()
+
+	mClock := quartz.NewMock(t)
+	cause := errors.New("parent cause")
+	parent, parentCancel := context.WithCancelCause(context.Background())
+	parentCancel(cause)
+
+	ctx, cancel := mClock.WithTimeout(parent, time.Hour)
+	defer cancel()
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("expected Canceled, got %v", ctx.Err())
+	}
+	if got := context.Cause(ctx); !errors.Is(got, cause) {
+		t.Fatalf("expected parent cause, got %v", got)
+	}
+	if d, ok := mClock.Peek(); ok {
+		t.Fatalf("expected no pending events, got Peek()=%s", d)
+	}
+}
+
+// The parent was canceled first, so its error and cause win even though the mock deadline is
+// reached before the context observes the parent asynchronously.
+func TestWithTimeout_ParentCanceledBeforeDeadline(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	parent, parentCancel := context.WithCancel(context.Background())
+	ctx, cancel := mClock.WithTimeout(parent, time.Second)
+	defer cancel()
+
+	parentCancel()
+	mClock.Advance(time.Second).MustWait(testCtx)
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("expected Canceled, got %v", ctx.Err())
+	}
+	if got := context.Cause(ctx); !errors.Is(got, context.Canceled) {
+		t.Fatalf("expected Canceled cause, got %v", got)
 	}
 }
 
@@ -484,8 +529,6 @@ func TestWithTimeoutCause_Cause(t *testing.T) {
 
 func TestWithTimeout_PastDeadline(t *testing.T) {
 	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
 
 	for _, d := range []time.Duration{0, -time.Second} {
 		t.Run(d.String(), func(t *testing.T) {
@@ -493,12 +536,7 @@ func TestWithTimeout_PastDeadline(t *testing.T) {
 			ctx, cancel := mClock.WithTimeout(context.Background(), d)
 			defer cancel()
 
-			select {
-			case <-ctx.Done():
-				// OK
-			case <-testCtx.Done():
-				t.Fatal("timeout waiting for past deadline")
-			}
+			// As with stdlib contexts, the context is done when WithTimeout returns.
 			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
 			}
