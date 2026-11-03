@@ -1079,8 +1079,8 @@ func (c clockFunction) String() string {
 	}
 }
 
-// trapFunction returns the function of the Trapper method that catches calls to c. Cause variants
-// have no Trapper method of their own, so a trap for the base function catches both.
+// trapFunction returns the clockFunction of the trap that catches calls to c. Cause variants share
+// the base function's trap so a test does not need to know which variant the code calls.
 func (c clockFunction) trapFunction() clockFunction {
 	switch c {
 	case clockFunctionWithDeadlineCause:
