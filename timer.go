@@ -54,8 +54,8 @@ func (t *Timer) fire(tt time.Time) {
 		t.mock.mu.Unlock()
 		go func() {
 			// select picks at random among ready cases. Send first to a reader that is already
-			// waiting, so it gets the value even when Stop, Reset or NewMock's cleanup is waiting on
-			// interrupt.
+			// waiting, so it gets the value even when Stop, Reset or NewMock's cleanup is waiting
+			// on interrupt.
 			select {
 			case t.c <- tt:
 			default:
@@ -70,7 +70,8 @@ func (t *Timer) fire(tt time.Time) {
 			close(interrupt)
 			t.mock.mu.Lock()
 			defer t.mock.mu.Unlock()
-			// Otherwise endWriteLocked has removed this write, and Reset may have started another.
+			// If interrupt has changed, endWriteLocked has removed this write, and Reset may have
+			// started another.
 			if t.interrupt == interrupt {
 				t.interrupt = nil
 				delete(t.mock.writes, t)
