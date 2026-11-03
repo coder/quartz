@@ -454,8 +454,9 @@ Which to use:
 - If every goroutine in the test starts in the bubble and blocks only in those ways, use `synctest`
   with `quartz.NewReal()`. No `*Mock` is needed.
 - If the test does real network I/O, for example against a database, use a `*Mock` outside a
-  bubble. On Go 1.27, an HTTP test can instead serve with `httptest.NewTestServer`, send requests
-  with its `Client()`, and stay in the bubble.
+  bubble. On Go 1.27, an HTTP test can instead create an `httptest.NewTestServer` inside the bubble
+  and send requests with its `Client()`. A server created outside the bubble crashes the test binary
+  with `fatal error: select on synctest channel from outside bubble`.
 - If you need traps, or want to move one clock without moving every timer in the bubble, use a
   `*Mock`, inside or outside a bubble.
 
