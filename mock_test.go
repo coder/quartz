@@ -1247,6 +1247,33 @@ func TestWithTimeout_TestEndCancelsLiveContexts(t *testing.T) {
 	}
 }
 
+func TestWithTimeout_TestEndCancelsBeforeEarlierCleanups(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	// Not parallel, so the subtest's cleanups run before testCancel.
+	t.Run("Subtest", func(t *testing.T) {
+		mClock := quartz.NewMock(t)
+		exited := make(chan struct{})
+		// Registered before the context is created, like t.Cleanup(srv.Close) for a server whose
+		// goroutine later blocks on a mock context.
+		t.Cleanup(func() {
+			select {
+			case <-exited:
+			case <-testCtx.Done():
+				t.Error("mock context was not canceled before a cleanup registered before it ran")
+			}
+		})
+		// The parent never cancels, so only test cleanup ends the context.
+		ctx, _ := mClock.WithTimeout(context.Background(), time.Hour)
+		go func() {
+			<-ctx.Done()
+			close(exited)
+		}()
+	})
+}
+
 func Test_MultipleTraps(t *testing.T) {
 	t.Parallel()
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
