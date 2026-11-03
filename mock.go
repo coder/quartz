@@ -232,13 +232,20 @@ type AdvanceWaiter struct {
 	ch chan struct{}
 }
 
-// Wait for all timers and ticks to complete, or until context expires.
+// Wait for all timers and ticks to complete, or until context expires. If the timers and ticks
+// have completed, Wait returns nil even if the context has also expired.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-w.ch:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		// select picks randomly among ready cases; report completion if it also happened.
+		select {
+		case <-w.ch:
+			return nil
+		default:
+			return ctx.Err()
+		}
 	}
 }
 
@@ -247,11 +254,8 @@ func (w AdvanceWaiter) Wait(ctx context.Context) error {
 // benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
 	w.tb.Helper()
-	select {
-	case <-w.ch:
-		return
-	case <-ctx.Done():
-		w.tb.Fatalf("context expired while waiting for clock to advance: %s", ctx.Err())
+	if err := w.Wait(ctx); err != nil {
+		w.tb.Fatalf("context expired while waiting for clock to advance: %s", err)
 	}
 }
 

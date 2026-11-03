@@ -591,6 +591,33 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 }
 
+// TestAdvanceWaiter_CompletedWithExpiredContext verifies that a completed advance is reported as
+// complete when the context has also expired, rather than at random.
+func TestAdvanceWaiter_CompletedWithExpiredContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("Wait", func(t *testing.T) {
+		t.Parallel()
+		mClock := quartz.NewMock(t)
+		// With no timers or tickers, the advance completes before Advance returns.
+		if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
+			t.Fatalf("Wait() = %v, want nil", err)
+		}
+	})
+
+	t.Run("MustWait", func(t *testing.T) {
+		t.Parallel()
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
+		mClock.Advance(time.Second).MustWait(ctx)
+		if tb.failed {
+			t.Fatal("MustWait failed the test after the advance completed")
+		}
+	})
+}
+
 func TestNoLeak_Go123(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
