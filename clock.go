@@ -36,8 +36,8 @@ type Clock interface {
 	// Until returns the duration until t. It is shorthand for t.Sub(Clock.Now()).
 	Until(t time.Time, tags ...string) time.Duration
 
-	// WithDeadline returns a copy of parent with a deadline governed by this Clock. When the
-	// deadline is reached, Err satisfies errors.Is(err, context.DeadlineExceeded). Parent
+	// WithDeadline returns a copy of parent that expires when this Clock reaches d. When it
+	// expires, Err satisfies errors.Is(err, context.DeadlineExceeded). Parent
 	// cancellation propagates with stdlib semantics. Parent deadlines are not converted to mock
 	// time, so a parent created with context.WithDeadline or context.WithTimeout can cancel the
 	// child independently of this Clock. The returned cancel function is idempotent and must be
@@ -50,16 +50,14 @@ type Clock interface {
 	// compute it from the deadline or timeout it passed in, not from ctx.Deadline().
 	WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc)
 
-	// WithDeadlineCause returns a copy of parent with a deadline governed by this Clock and
-	// records cause when this Clock reaches the deadline.
+	// WithDeadlineCause is like WithDeadline and records cause when this Clock reaches d.
 	WithDeadlineCause(parent context.Context, d time.Time, cause error, tags ...string) (context.Context, context.CancelFunc)
 
-	// WithTimeout returns a copy of parent with a timeout governed by this Clock. It is shorthand
+	// WithTimeout returns a copy of parent that expires after d on this Clock. It is shorthand
 	// for WithDeadline(parent, Clock.Now().Add(d)).
 	WithTimeout(parent context.Context, d time.Duration, tags ...string) (context.Context, context.CancelFunc)
 
-	// WithTimeoutCause returns a copy of parent with a timeout governed by this Clock and records
-	// cause when this Clock reaches the timeout.
+	// WithTimeoutCause is like WithTimeout and records cause when this Clock reaches the timeout.
 	WithTimeoutCause(parent context.Context, d time.Duration, cause error, tags ...string) (context.Context, context.CancelFunc)
 }
 

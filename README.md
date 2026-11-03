@@ -315,8 +315,8 @@ by the real clock. They also appear on all methods on returned timers and ticker
 ### Contexts
 
 `Clock` provides `WithDeadline`, `WithDeadlineCause`, `WithTimeout`, and `WithTimeoutCause` methods
-that mirror the standard `context` package. With a `*Mock`, deadlines created through the clock
-advance on mock time:
+that mirror the standard `context` package. With a `*Mock`, contexts created through the clock
+expire on mock time:
 
 ```go
 ctx, cancel := mClock.WithTimeout(context.Background(), 30*time.Second)
@@ -328,7 +328,8 @@ if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 }
 ```
 
-Deadlines created through `mClock.WithDeadline` and `mClock.WithTimeout` use mock time. Parent
+Contexts created through `mClock.WithDeadline` and `mClock.WithTimeout` expire when mock time
+reaches the deadline. `ctx.Deadline()` does not report that time; see below. Parent
 contexts keep standard `context` behavior. A parent created with `context.WithDeadline` or
 `context.WithTimeout` can still cancel the child on wall time because Quartz does not convert
 parent deadlines to mock time.
