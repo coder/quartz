@@ -645,6 +645,58 @@ func TestWithTimeout_Trap(t *testing.T) {
 	}
 }
 
+func TestWithTimeout_CanceledMockParent(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	parent, parentCancel := mClock.WithTimeout(context.Background(), time.Hour)
+	parentCancel()
+
+	got := make(chan context.Context, 1)
+	go func() {
+		ctx, cancel := mClock.WithTimeout(parent, time.Hour)
+		t.Cleanup(cancel)
+		got <- ctx
+	}()
+	select {
+	case ctx := <-got:
+		select {
+		case <-ctx.Done():
+		case <-testCtx.Done():
+			t.Fatal("timeout waiting for context with canceled mock parent")
+		}
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("expected Canceled, got %v", ctx.Err())
+		}
+	case <-testCtx.Done():
+		t.Fatal("WithTimeout with a canceled mock parent did not return")
+	}
+}
+
+func TestTickerFunc_MockContext(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+	w := mClock.TickerFunc(ctx, time.Second, func() error { return nil })
+	cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Wait() }()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected Canceled, got %v", err)
+		}
+	case <-testCtx.Done():
+		t.Fatal("TickerFunc did not exit after its mock context was canceled")
+	}
+}
+
 func Test_MultipleTraps(t *testing.T) {
 	t.Parallel()
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)

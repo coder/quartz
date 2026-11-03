@@ -159,45 +159,37 @@ func (m *Mock) Until(t time.Time, tags ...string) time.Duration {
 }
 
 func (m *Mock) WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	c := newCall(clockFunctionWithDeadline, tags, withTime(d))
-	m.matchCallLocked(c)
-	defer close(c.complete)
-	return m.withDeadlineCauseLocked(parent, d, nil)
+	return m.newMockCtx(parent, c, nil, func() time.Time { return d })
 }
 
 func (m *Mock) WithDeadlineCause(parent context.Context, d time.Time, cause error, tags ...string) (context.Context, context.CancelFunc) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	c := newCall(clockFunctionWithDeadlineCause, tags, withTime(d), withCause(cause))
-	m.matchCallLocked(c)
-	defer close(c.complete)
-	return m.withDeadlineCauseLocked(parent, d, cause)
+	return m.newMockCtx(parent, c, cause, func() time.Time { return d })
 }
 
 func (m *Mock) WithTimeout(parent context.Context, d time.Duration, tags ...string) (context.Context, context.CancelFunc) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	c := newCall(clockFunctionWithTimeout, tags, withDuration(d))
-	m.matchCallLocked(c)
-	defer close(c.complete)
-	deadline := m.cur.Add(d)
-	return m.withDeadlineCauseLocked(parent, deadline, nil)
+	return m.newMockCtx(parent, c, nil, func() time.Time { return m.cur.Add(d) })
 }
 
 func (m *Mock) WithTimeoutCause(parent context.Context, d time.Duration, cause error, tags ...string) (context.Context, context.CancelFunc) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	c := newCall(clockFunctionWithTimeoutCause, tags, withDuration(d), withCause(cause))
-	m.matchCallLocked(c)
-	defer close(c.complete)
-	deadline := m.cur.Add(d)
-	return m.withDeadlineCauseLocked(parent, deadline, cause)
+	return m.newMockCtx(parent, c, cause, func() time.Time { return m.cur.Add(d) })
 }
 
-func (m *Mock) withDeadlineCauseLocked(parent context.Context, d time.Time, cause error) (context.Context, context.CancelFunc) {
+// newMockCtx creates the context for call. deadlineLocked is evaluated with m.mu held after any
+// traps release the call.
+func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, deadlineLocked func() time.Time) (context.Context, context.CancelFunc) {
+	// Created before taking m.mu: WithCancelCause calls parent.Err(), which takes m.mu when
+	// parent is a context from this Mock.
 	inner, innerCancel := context.WithCancelCause(parent)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.matchCallLocked(call)
+	defer close(call.complete)
+	d := deadlineLocked()
 	c := &mockCtx{
 		inner:       inner,
 		innerCancel: innerCancel,
@@ -653,12 +645,14 @@ func (m *mockTickerFunc) exitLocked(err error) {
 
 func (m *mockTickerFunc) waitForCtx() {
 	<-m.ctx.Done()
+	// Read before taking mock.mu: Err() takes mock.mu when ctx is a context from this Mock.
+	err := m.ctx.Err()
 	m.mock.mu.Lock()
 	defer m.mock.mu.Unlock()
 	for m.inProgress {
 		m.cond.Wait()
 	}
-	m.exitLocked(m.ctx.Err())
+	m.exitLocked(err)
 }
 
 func (m *mockTickerFunc) Wait(tags ...string) error {
