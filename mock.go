@@ -23,11 +23,11 @@ type TestingT interface {
 	Cleanup(func())
 }
 
-// ErrMockClockTestEnded is the context.Cause of a mock context that was still live when the test
-// ended; its Err is context.Canceled. Each context is canceled by a cleanup registered when the
-// context was created, so it is still live in cleanups registered after that, which run first. A
-// context created after the cleanup registered by NewMock has run, in a cleanup registered before
-// NewMock or by a goroutine that outlived the test, is returned already canceled with this cause.
+// ErrMockClockTestEnded is used as the cancellation cause when test cleanup cancels a context that
+// was not canceled by its caller.
+//
+// The cleanup that NewMock registers cancels these contexts. Cleanups run in last added, first
+// called order, so cleanups registered after NewMock still see them live.
 var ErrMockClockTestEnded = errors.New("quartz: mock clock test ended")
 
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
@@ -212,7 +212,6 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	if !pastDeadline {
 		m.addEventLocked(c)
 	}
-	m.tb.Cleanup(func() { c.cancel(context.Canceled, ErrMockClockTestEnded) })
 	close(call.complete)
 	m.mu.Unlock()
 
@@ -264,17 +263,23 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 // checkDoneContexts cancels contexts whose parents are done, so their pending events do not block
 // Advance or show up in Peek.
 func (m *Mock) checkDoneContexts() {
+	for _, c := range m.liveContexts() {
+		c.checkParent()
+	}
+}
+
+// liveContexts returns the contexts that are not done. Each one is an event in m.all from when
+// newMockCtx returns it until cancel removes it.
+func (m *Mock) liveContexts() []*mockCtx {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	var ctxs []*mockCtx
 	for _, e := range m.all {
 		if c, ok := e.(*mockCtx); ok {
 			ctxs = append(ctxs, c)
 		}
 	}
-	m.mu.Unlock()
-	for _, c := range ctxs {
-		c.checkParent()
-	}
+	return ctxs
 }
 
 func (m *Mock) addEventLocked(e event) {
@@ -634,6 +639,11 @@ func NewMock(tb TestingT) *Mock {
 		cur:    cur,
 	}
 	tb.Cleanup(func() {
+		// One cleanup for all contexts, rather than one per context, so a done context is not kept
+		// reachable until the test ends.
+		for _, c := range m.liveContexts() {
+			c.cancel(context.Canceled, ErrMockClockTestEnded)
+		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.testOver = true
