@@ -496,6 +496,21 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 			defer testCancel()
 			mClock.Advance(2 * time.Hour).MustWait(testCtx)
 		},
+		"Set": func(t *testing.T, mClock *quartz.Mock, _ context.Context) {
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+			mClock.Set(mClock.Now().Add(2 * time.Hour)).MustWait(testCtx)
+		},
+		"AdvanceNext": func(t *testing.T, mClock *quartz.Mock, _ context.Context) {
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+			mClock.NewTimer(2 * time.Hour) // AdvanceNext fails the test when nothing is scheduled.
+			d, w := mClock.AdvanceNext()
+			w.MustWait(testCtx)
+			if d != 2*time.Hour {
+				t.Fatalf("expected AdvanceNext to skip the canceled context, advanced %s", d)
+			}
+		},
 	}
 	for name, fn := range observe {
 		t.Run(name, func(t *testing.T) {
