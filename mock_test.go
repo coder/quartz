@@ -510,7 +510,7 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 	}
 }
 
-// A context created from a done parent reports the parent's error and cause, as a stdlib child does.
+// A context created from a done parent reports the parent's error and cause, as stdlib children do.
 func TestWithTimeout_ParentAlreadyDone(t *testing.T) {
 	t.Parallel()
 
