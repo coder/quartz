@@ -447,8 +447,8 @@ whose fake clock moves forward when every goroutine in the bubble is
   there. You need no `*Mock`, `Advance()`, or traps.
 - If the test does real I/O, such as database queries or requests over a real network, use a
   `*Mock` outside a bubble, as in [Mocking](#mocking). Bubble time stops while a goroutine waits on
-  I/O. On Go 1.27, HTTP tests can stay in the bubble with an `httptest.NewTestServer` created there
-  and its `Client()`.
+  I/O. With `go 1.27` or later in `go.mod`, HTTP tests can stay in the bubble with an
+  `httptest.NewTestServer` created there and its `Client()`.
 - If you need traps or want to decide when time moves, use a `*Mock`, in a bubble or not. Bubble
   time does not move it.
 
