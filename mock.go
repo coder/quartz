@@ -571,20 +571,14 @@ func (t Trapper) Until(tags ...string) *Trap {
 	return t.mock.newTrap(clockFunctionUntil, tags)
 }
 
+// WithDeadline traps calls to WithDeadline and WithDeadlineCause.
 func (t Trapper) WithDeadline(tags ...string) *Trap {
 	return t.mock.newTrap(clockFunctionWithDeadline, tags)
 }
 
-func (t Trapper) WithDeadlineCause(tags ...string) *Trap {
-	return t.mock.newTrap(clockFunctionWithDeadlineCause, tags)
-}
-
+// WithTimeout traps calls to WithTimeout and WithTimeoutCause.
 func (t Trapper) WithTimeout(tags ...string) *Trap {
 	return t.mock.newTrap(clockFunctionWithTimeout, tags)
-}
-
-func (t Trapper) WithTimeoutCause(tags ...string) *Trap {
-	return t.mock.newTrap(clockFunctionWithTimeoutCause, tags)
 }
 
 func (m *Mock) Trap() Trapper {
@@ -1085,6 +1079,19 @@ func (c clockFunction) String() string {
 	}
 }
 
+// trapFunction returns the function of the Trapper method that catches calls to c. Cause variants
+// have no Trapper method of their own, so a trap for the base function catches both.
+func (c clockFunction) trapFunction() clockFunction {
+	switch c {
+	case clockFunctionWithDeadlineCause:
+		return clockFunctionWithDeadline
+	case clockFunctionWithTimeoutCause:
+		return clockFunctionWithTimeout
+	default:
+		return c
+	}
+}
+
 type callArg func(c *apiCall)
 
 // apiCall represents a single call to one of the Clock APIs.
@@ -1142,7 +1149,7 @@ func (a *apiCall) String() string {
 type Call struct {
 	Time     time.Time
 	Duration time.Duration
-	Cause    error // Cause passed to a cause variant, if applicable.
+	Cause    error // Cause passed to WithDeadlineCause or WithTimeoutCause, nil for other calls.
 	Tags     []string
 
 	tb      TestingT
@@ -1234,7 +1241,7 @@ func (t *Trap) catch(c *apiCall) {
 }
 
 func (t *Trap) matches(c *apiCall) bool {
-	if t.fn != c.fn {
+	if t.fn != c.fn.trapFunction() {
 		return false
 	}
 	for _, tag := range t.tags {

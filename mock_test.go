@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1172,39 +1173,103 @@ func TestWithTimeout_Trap(t *testing.T) {
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
 	}
+}
 
-	causeErr := errors.New("trap cause")
-	trapCause := mClock.Trap().WithTimeoutCause("cause")
-	defer trapCause.Close()
-	go func() {
-		ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Minute, causeErr, "cause")
-		ctxs <- ctx
-		cancels <- cancel
-	}()
+func TestTrap_CatchesCauseVariants(t *testing.T) {
+	t.Parallel()
 
-	call = trapCause.MustWait(testCtx)
-	if call.Duration != time.Minute {
-		t.Fatalf("expected time.Minute, got %v", call.Duration)
-	}
-	if !errors.Is(call.Cause, causeErr) {
-		t.Fatalf("expected cause %v, got %v", causeErr, call.Cause)
-	}
-	call.MustRelease(testCtx)
-	select {
-	case ctx = <-ctxs:
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for trapped WithTimeoutCause context")
-	}
-	select {
-	case cancel = <-cancels:
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for trapped WithTimeoutCause cancel")
-	}
-	cancel()
-	select {
-	case <-ctx.Done():
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for canceled WithTimeoutCause ctx")
+	cause := errors.New("trap cause")
+	deadline := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name         string
+		trap         func(quartz.Trapper, ...string) *quartz.Trap
+		call         func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc)
+		wantTime     time.Time
+		wantDuration time.Duration
+		wantCause    error
+	}{
+		{
+			name: "WithDeadline",
+			trap: quartz.Trapper.WithDeadline,
+			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
+				return m.WithDeadline(context.Background(), deadline, tags...)
+			},
+			wantTime: deadline,
+		},
+		{
+			name: "WithDeadlineCause",
+			trap: quartz.Trapper.WithDeadline,
+			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
+				return m.WithDeadlineCause(context.Background(), deadline, cause, tags...)
+			},
+			wantTime:  deadline,
+			wantCause: cause,
+		},
+		{
+			name: "WithTimeout",
+			trap: quartz.Trapper.WithTimeout,
+			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
+				return m.WithTimeout(context.Background(), time.Hour, tags...)
+			},
+			wantDuration: time.Hour,
+		},
+		{
+			name: "WithTimeoutCause",
+			trap: quartz.Trapper.WithTimeout,
+			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
+				return m.WithTimeoutCause(context.Background(), time.Hour, cause, tags...)
+			},
+			wantDuration: time.Hour,
+			wantCause:    cause,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+
+			mClock := quartz.NewMock(t)
+			trap := tc.trap(mClock.Trap(), "match")
+			defer trap.Close()
+			cancels := make(chan context.CancelFunc, 1)
+
+			// The trap does not catch a call without its tags, so the call returns unreleased.
+			go func() {
+				_, cancel := tc.call(mClock, "other")
+				cancels <- cancel
+			}()
+			select {
+			case cancel := <-cancels:
+				cancel()
+			case <-testCtx.Done():
+				t.Fatal("timeout waiting for call without the trap's tags")
+			}
+
+			go func() {
+				_, cancel := tc.call(mClock, "match")
+				cancels <- cancel
+			}()
+			call := trap.MustWait(testCtx)
+			if !slices.Equal(call.Tags, []string{"match"}) {
+				t.Fatalf("expected tags [match], got %v", call.Tags)
+			}
+			if !call.Time.Equal(tc.wantTime) {
+				t.Fatalf("expected time %v, got %v", tc.wantTime, call.Time)
+			}
+			if call.Duration != tc.wantDuration {
+				t.Fatalf("expected duration %v, got %v", tc.wantDuration, call.Duration)
+			}
+			if call.Cause != tc.wantCause {
+				t.Fatalf("expected cause %v, got %v", tc.wantCause, call.Cause)
+			}
+			call.MustRelease(testCtx)
+			select {
+			case cancel := <-cancels:
+				cancel()
+			case <-testCtx.Done():
+				t.Fatal("timeout waiting for released call to return")
+			}
+		})
 	}
 }
 
