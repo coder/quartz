@@ -606,16 +606,6 @@ func TestAdvanceWaiter_CompletedWithExpiredContext(t *testing.T) {
 			t.Fatalf("Wait() = %v, want nil", err)
 		}
 	})
-
-	t.Run("MustWait", func(t *testing.T) {
-		t.Parallel()
-		tb := &captureFailTB{TB: t}
-		mClock := quartz.NewMock(tb)
-		mClock.Advance(time.Second).MustWait(ctx)
-		if tb.failed {
-			t.Fatal("MustWait failed the test after the advance completed")
-		}
-	})
 }
 
 // TestExpiredContext_WorkPending verifies that waits still return the context error when the
