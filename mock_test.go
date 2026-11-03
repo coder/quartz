@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1129,96 +1128,51 @@ func TestWithTimeout_CancelRace(t *testing.T) {
 	}
 }
 
-func TestWithTimeout_Trap(t *testing.T) {
-	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-
-	mClock := quartz.NewMock(t)
-	trap := mClock.Trap().WithTimeout("ctx")
-	defer trap.Close()
-	ctxs := make(chan context.Context, 1)
-	cancels := make(chan context.CancelFunc, 1)
-	go func() {
-		ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour, "ctx")
-		ctxs <- ctx
-		cancels <- cancel
-	}()
-
-	call := trap.MustWait(testCtx)
-	if call.Duration != time.Hour {
-		t.Fatalf("expected time.Hour, got %v", call.Duration)
-	}
-	call.MustRelease(testCtx)
-	var ctx context.Context
-	select {
-	case ctx = <-ctxs:
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for trapped WithTimeout context")
-	}
-	var cancel context.CancelFunc
-	select {
-	case cancel = <-cancels:
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for trapped WithTimeout cancel")
-	}
-	defer cancel()
-	mClock.Advance(time.Hour).MustWait(testCtx)
-	select {
-	case <-ctx.Done():
-		// OK
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for trapped context")
-	}
-	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
-	}
-}
-
-func TestTrap_CatchesCauseVariants(t *testing.T) {
+func TestTrap_Contexts(t *testing.T) {
 	t.Parallel()
 
 	cause := errors.New("trap cause")
-	deadline := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name         string
 		trap         func(quartz.Trapper, ...string) *quartz.Trap
-		call         func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc)
-		wantTime     time.Time
+		call         func(*quartz.Mock) (context.Context, context.CancelFunc)
+		wantTime     func(*quartz.Mock) time.Time
 		wantDuration time.Duration
 		wantCause    error
 	}{
 		{
 			name: "WithDeadline",
 			trap: quartz.Trapper.WithDeadline,
-			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
-				return m.WithDeadline(context.Background(), deadline, tags...)
+			call: func(m *quartz.Mock) (context.Context, context.CancelFunc) {
+				return m.WithDeadline(context.Background(), m.Now().Add(time.Hour))
 			},
-			wantTime: deadline,
+			wantTime: func(m *quartz.Mock) time.Time { return m.Now().Add(time.Hour) },
 		},
 		{
 			name: "WithDeadlineCause",
 			trap: quartz.Trapper.WithDeadline,
-			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
-				return m.WithDeadlineCause(context.Background(), deadline, cause, tags...)
+			call: func(m *quartz.Mock) (context.Context, context.CancelFunc) {
+				return m.WithDeadlineCause(context.Background(), m.Now().Add(time.Hour), cause)
 			},
-			wantTime:  deadline,
+			wantTime:  func(m *quartz.Mock) time.Time { return m.Now().Add(time.Hour) },
 			wantCause: cause,
 		},
 		{
 			name: "WithTimeout",
 			trap: quartz.Trapper.WithTimeout,
-			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
-				return m.WithTimeout(context.Background(), time.Hour, tags...)
+			call: func(m *quartz.Mock) (context.Context, context.CancelFunc) {
+				return m.WithTimeout(context.Background(), time.Hour)
 			},
+			wantTime:     func(*quartz.Mock) time.Time { return time.Time{} },
 			wantDuration: time.Hour,
 		},
 		{
 			name: "WithTimeoutCause",
 			trap: quartz.Trapper.WithTimeout,
-			call: func(m *quartz.Mock, tags ...string) (context.Context, context.CancelFunc) {
-				return m.WithTimeoutCause(context.Background(), time.Hour, cause, tags...)
+			call: func(m *quartz.Mock) (context.Context, context.CancelFunc) {
+				return m.WithTimeoutCause(context.Background(), time.Hour, cause)
 			},
+			wantTime:     func(*quartz.Mock) time.Time { return time.Time{} },
 			wantDuration: time.Hour,
 			wantCause:    cause,
 		},
@@ -1229,32 +1183,22 @@ func TestTrap_CatchesCauseVariants(t *testing.T) {
 			defer testCancel()
 
 			mClock := quartz.NewMock(t)
-			trap := tc.trap(mClock.Trap(), "match")
+			wantTime := tc.wantTime(mClock)
+			trap := tc.trap(mClock.Trap())
 			defer trap.Close()
-			cancels := make(chan context.CancelFunc, 1)
-
-			// The trap does not catch a call without its tags, so the call returns unreleased.
-			go func() {
-				_, cancel := tc.call(mClock, "other")
-				cancels <- cancel
-			}()
-			select {
-			case cancel := <-cancels:
-				cancel()
-			case <-testCtx.Done():
-				t.Fatal("timeout waiting for call without the trap's tags")
+			type result struct {
+				ctx    context.Context
+				cancel context.CancelFunc
 			}
-
+			results := make(chan result, 1)
 			go func() {
-				_, cancel := tc.call(mClock, "match")
-				cancels <- cancel
+				ctx, cancel := tc.call(mClock)
+				results <- result{ctx, cancel}
 			}()
+
 			call := trap.MustWait(testCtx)
-			if !slices.Equal(call.Tags, []string{"match"}) {
-				t.Fatalf("expected tags [match], got %v", call.Tags)
-			}
-			if !call.Time.Equal(tc.wantTime) {
-				t.Fatalf("expected time %v, got %v", tc.wantTime, call.Time)
+			if !call.Time.Equal(wantTime) {
+				t.Fatalf("expected time %v, got %v", wantTime, call.Time)
 			}
 			if call.Duration != tc.wantDuration {
 				t.Fatalf("expected duration %v, got %v", tc.wantDuration, call.Duration)
@@ -1263,11 +1207,17 @@ func TestTrap_CatchesCauseVariants(t *testing.T) {
 				t.Fatalf("expected cause %v, got %v", tc.wantCause, call.Cause)
 			}
 			call.MustRelease(testCtx)
+			var r result
 			select {
-			case cancel := <-cancels:
-				cancel()
+			case r = <-results:
 			case <-testCtx.Done():
-				t.Fatal("timeout waiting for released call to return")
+				t.Fatal("timeout waiting for the released call to return")
+			}
+			defer r.cancel()
+
+			mClock.Advance(time.Hour).MustWait(testCtx)
+			if !errors.Is(r.ctx.Err(), context.DeadlineExceeded) {
+				t.Fatalf("expected DeadlineExceeded, got %v", r.ctx.Err())
 			}
 		})
 	}
