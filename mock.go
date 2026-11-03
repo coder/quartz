@@ -379,19 +379,19 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 	m.mu.Lock()
 }
 
-// AdvanceWaiter is returned from Advance and Set calls and allows you to wait for ticks and timers
-// to complete.  In the case of functions passed to AfterFunc or TickerFunc, it waits for the
+// AdvanceWaiter is returned from Advance and Set calls and allows you to wait for the triggered
+// events to complete.  In the case of functions passed to AfterFunc or TickerFunc, it waits for the
 // functions to return.  For other ticks & timers, it just waits for the tick to be delivered to
-// the channel.
+// the channel.  For a mock context, it waits until the context is done, along with the contexts
+// derived from it directly, such as with context.WithCancel or this Mock's WithTimeout.
 //
-// If multiple timers or tickers trigger simultaneously, they are all run on separate
-// go routines.
+// If multiple events trigger simultaneously, they are all run on separate go routines.
 type AdvanceWaiter struct {
 	tb TestingT
 	ch chan struct{}
 }
 
-// Wait for all timers and ticks to complete, or until context expires.
+// Wait for all triggered events to complete, or until ctx expires.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-w.ch:
@@ -401,7 +401,7 @@ func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	}
 }
 
-// MustWait waits for all timers and ticks to complete, and fails the test immediately if the
+// MustWait waits for all triggered events to complete, and fails the test immediately if the
 // context completes first.  MustWait must be called from the goroutine running the test or
 // benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
@@ -414,7 +414,7 @@ func (w AdvanceWaiter) MustWait(ctx context.Context) {
 	}
 }
 
-// Done returns a channel that is closed when all timers and ticks complete.
+// Done returns a channel that is closed when all triggered events complete.
 func (w AdvanceWaiter) Done() <-chan struct{} {
 	return w.ch
 }
