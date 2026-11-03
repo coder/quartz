@@ -618,6 +618,42 @@ func TestAdvanceWaiter_CompletedWithExpiredContext(t *testing.T) {
 	})
 }
 
+// TestExpiredContext_WorkPending verifies that waits still return the context error when the
+// context has expired and the awaited work has not happened.
+func TestExpiredContext_WorkPending(t *testing.T) {
+	t.Parallel()
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("AdvanceWaiter", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		mClock := quartz.NewMock(t)
+		release := make(chan struct{})
+		mClock.AfterFunc(time.Second, func() { <-release })
+		w := mClock.Advance(time.Second)
+		// The advance cannot complete until the AfterFunc returns.
+		err := w.Wait(expired)
+		close(release)
+		w.MustWait(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+		}
+	})
+
+	t.Run("Trap", func(t *testing.T) {
+		t.Parallel()
+		mClock := quartz.NewMock(t)
+		trap := mClock.Trap().Now()
+		defer trap.Close()
+		if _, err := trap.Wait(expired); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+		}
+	})
+}
+
 func TestNoLeak_Go123(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
