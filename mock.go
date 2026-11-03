@@ -816,8 +816,9 @@ func (t *Trap) callReleased() {
 
 var ErrTrapClosed = errors.New("trap closed")
 
-// Wait for a call to be trapped, or until the context expires or the trap is closed. If a call is
-// ready, Wait returns it even if the context has also expired.
+// Wait for a call to be trapped, or until the context expires or the trap is closed. If a call
+// has arrived by the time the context expires, Wait returns it. Trapped calls arrive from other
+// goroutines, so a context that has already expired gives them no time to arrive.
 func (t *Trap) Wait(ctx context.Context) (*Call, error) {
 	var a *apiCall
 	select {
