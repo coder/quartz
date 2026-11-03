@@ -69,6 +69,12 @@ func (s eventSource) describe(kind string) string {
 	return fmt.Sprintf("%s from %s(..., %v)", kind, s.fn, s.tags)
 }
 
+// newEventSource copies the tags, which may alias the caller's variadic slice. The caller may reuse
+// that slice once the call returns, while describe reads the tags later.
+func newEventSource(c *apiCall) eventSource {
+	return eventSource{fn: c.fn, tags: slices.Clone(c.Tags)}
+}
+
 func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, tags ...string) Waiter {
 	if d <= 0 {
 		panic("TickerFunc called with negative or zero duration")
@@ -85,7 +91,7 @@ func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, 
 		nxt:  m.cur.Add(d),
 		mock: m,
 		cond: sync.NewCond(&m.mu),
-		src:  eventSource{fn: c.fn, tags: c.Tags},
+		src:  newEventSource(c),
 	}
 	m.all = append(m.all, t)
 	m.recomputeNextLocked()
@@ -105,7 +111,7 @@ func (m *Mock) NewTicker(d time.Duration, tags ...string) *Ticker {
 	c := newCall(clockFunctionNewTicker, tags, withDuration(d))
 	m.matchCallLocked(c)
 	defer close(c.complete)
-	return newMockTickerLocked(m, d, eventSource{fn: c.fn, tags: c.Tags})
+	return newMockTickerLocked(m, d, newEventSource(c))
 }
 
 func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
@@ -120,7 +126,7 @@ func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
 		c:    ch,
 		nxt:  m.cur.Add(d),
 		mock: m,
-		src:  eventSource{fn: c.fn, tags: c.Tags},
+		src:  newEventSource(c),
 	}
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
@@ -142,7 +148,7 @@ func (m *Mock) AfterFunc(d time.Duration, f func(), tags ...string) *Timer {
 		nxt:  m.cur.Add(d),
 		fn:   f,
 		mock: m,
-		src:  eventSource{fn: c.fn, tags: c.Tags},
+		src:  newEventSource(c),
 	}
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
@@ -219,7 +225,7 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 		finished:     make(chan struct{}),
 		cause:        cause,
 		mock:         m,
-		src:          eventSource{fn: call.fn, tags: call.Tags},
+		src:          newEventSource(call),
 		done:         make(chan struct{}),
 	}
 

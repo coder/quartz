@@ -1218,33 +1218,37 @@ func TestMock_FailureNamesBlockingEvents(t *testing.T) {
 		t.Parallel()
 		for _, tc := range []struct {
 			name     string
-			schedule func(t *testing.T, mClock *quartz.Mock)
+			schedule func(t *testing.T, mClock *quartz.Mock, tags []string)
 			want     string
 		}{
-			{"WithTimeout", func(t *testing.T, mClock *quartz.Mock) {
-				_, cancel := mClock.WithTimeout(context.Background(), 30*time.Second, "a")
+			{"WithTimeout", func(t *testing.T, mClock *quartz.Mock, tags []string) {
+				_, cancel := mClock.WithTimeout(context.Background(), 30*time.Second, tags...)
 				t.Cleanup(cancel)
 			}, "mock context from WithTimeout(..., [a])"},
-			{"NewTimer", func(_ *testing.T, mClock *quartz.Mock) {
-				mClock.NewTimer(30*time.Second, "a")
+			{"NewTimer", func(_ *testing.T, mClock *quartz.Mock, tags []string) {
+				mClock.NewTimer(30*time.Second, tags...)
 			}, "timer from NewTimer(..., [a])"},
-			{"AfterFunc", func(_ *testing.T, mClock *quartz.Mock) {
-				mClock.AfterFunc(30*time.Second, func() {}, "a")
+			{"AfterFunc", func(_ *testing.T, mClock *quartz.Mock, tags []string) {
+				mClock.AfterFunc(30*time.Second, func() {}, tags...)
 			}, "timer from AfterFunc(..., [a])"},
-			{"NewTicker", func(_ *testing.T, mClock *quartz.Mock) {
-				mClock.NewTicker(30*time.Second, "a")
+			{"NewTicker", func(_ *testing.T, mClock *quartz.Mock, tags []string) {
+				mClock.NewTicker(30*time.Second, tags...)
 			}, "ticker from NewTicker(..., [a])"},
-			{"TickerFunc", func(t *testing.T, mClock *quartz.Mock) {
+			{"TickerFunc", func(t *testing.T, mClock *quartz.Mock, tags []string) {
 				ctx, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)
-				mClock.TickerFunc(ctx, 30*time.Second, func() error { return nil }, "a")
+				mClock.TickerFunc(ctx, 30*time.Second, func() error { return nil }, tags...)
 			}, "ticker from TickerFunc(..., [a])"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
 				tb := &captureFailTB{TB: t}
 				mClock := quartz.NewMock(tb)
-				tc.schedule(t, mClock)
+				tags := []string{"a"}
+				tc.schedule(t, mClock, tags)
+				// The caller may reuse its tags slice once the call returns. The failure still
+				// reports the tags the event was created with.
+				tags[0] = "reused"
 
 				mClock.Advance(time.Hour)
 				want := []string{
