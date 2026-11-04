@@ -713,7 +713,8 @@ func (c *Call) Release(ctx context.Context) error {
 	c.trap.callReleased()
 	c.apiCall.releases.Done()
 	if expired != nil {
-		return c.releaseError(expired)
+		return fmt.Errorf("context already expired when Release was called; the call was "+
+			"released: %w", expired)
 	}
 	select {
 	case <-ctx.Done():
@@ -723,6 +724,7 @@ func (c *Call) Release(ctx context.Context) error {
 	}
 }
 
+// releaseError reports a context that expired while Release waited for the call to complete.
 func (c *Call) releaseError(err error) error {
 	if c.apiCall.trapCount > 1 {
 		return fmt.Errorf("timed out waiting for the call to complete; %d traps caught it, "+

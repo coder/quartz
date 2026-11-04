@@ -374,8 +374,9 @@ func Test_MultipleTraps(t *testing.T) {
 }
 
 // TestCallRelease_ExpiredContext verifies that Release returns the context error when the context
-// expires before the call completes, still releases the call so that it returns, and names the
-// trap count only when more than one trap caught the call. Close must not report the call.
+// expires before the call completes, still releases the call so that it returns, and mentions other
+// traps only when they kept the call from completing while Release waited. Close must not report
+// the call.
 func TestCallRelease_ExpiredContext(t *testing.T) {
 	t.Parallel()
 	expired, cancel := context.WithCancel(context.Background())
@@ -384,15 +385,15 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		traps int
-		// whileWaiting gives Release a context that expires 10ms after Release is called, while
-		// Release waits for the other traps. The result is the same if it expires sooner.
+		// whileWaiting gives Release a context that expires once Release waits for the other
+		// traps, instead of one that has already expired.
 		whileWaiting bool
-		// hint must be in the error; if empty, the error must not mention traps.
-		hint string
+		// want must be in the error.
+		want string
 	}{
-		{name: "OneTrap", traps: 1},
-		{name: "TwoTraps", traps: 2, hint: "2 traps"},
-		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, hint: "2 traps"},
+		{name: "OneTrap", traps: 1, want: "already expired when Release was called"},
+		{name: "TwoTraps", traps: 2, want: "already expired when Release was called"},
+		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, want: "2 traps"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -417,11 +418,9 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			releaseCtx := expired
+			var releaseCtx context.Context = expired
 			if tt.whileWaiting {
-				var cancelRelease context.CancelFunc
-				releaseCtx, cancelRelease = context.WithTimeout(ctx, 10*time.Millisecond)
-				defer cancelRelease()
+				releaseCtx = newExpiresOnWaitCtx(t)
 			}
 			errs := make(chan error, 1)
 			go func() { errs <- c.Release(releaseCtx) }()
@@ -433,11 +432,11 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 			if releaseCtx.Err() == nil || !errors.Is(err, releaseCtx.Err()) {
 				t.Fatalf("Release() = %v, want %v", err, releaseCtx.Err())
 			}
-			if tt.hint == "" && strings.Contains(err.Error(), "trap") {
-				t.Fatalf("Release() = %q, want no mention of other traps", err)
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Release() = %q, want it to contain %q", err, tt.want)
 			}
-			if !strings.Contains(err.Error(), tt.hint) {
-				t.Fatalf("Release() = %q, want it to contain %q", err, tt.hint)
+			if !tt.whileWaiting && strings.Contains(err.Error(), "trap") {
+				t.Fatalf("Release() = %q, want no mention of other traps", err)
 			}
 
 			for _, trap := range traps[1:] {
@@ -609,6 +608,25 @@ func tRunFail(t testing.TB, f func(t testing.TB)) {
 	if !tb.Failed() {
 		t.Fatal("want test to fail")
 	}
+}
+
+// expiresOnWaitCtx is a context that is live until its Done channel is first requested, and then
+// expires. Release and Trap.Wait check ctx.Err() on entry and call Done only to wait, so it stands
+// in for a context that expires while they wait, without depending on timing.
+type expiresOnWaitCtx struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+func newExpiresOnWaitCtx(t testing.TB) expiresOnWaitCtx {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return expiresOnWaitCtx{Context: ctx, cancel: cancel}
+}
+
+func (c expiresOnWaitCtx) Done() <-chan struct{} {
+	c.cancel()
+	return c.Context.Done()
 }
 
 type testLogger struct {
