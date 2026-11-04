@@ -376,7 +376,7 @@ func Test_MultipleTraps(t *testing.T) {
 // TestCallRelease_ExpiredContext verifies that Release returns the context error when the context
 // expires before the call completes, still releases the call so that it returns, and mentions other
 // traps only when they kept the call from completing while Release waited. Close must not report
-// the call.
+// the call, and a failed MustRelease must name MustRelease and the call.
 func TestCallRelease_ExpiredContext(t *testing.T) {
 	t.Parallel()
 	expired, cancel := context.WithCancel(context.Background())
@@ -469,6 +469,33 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("MustRelease", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
+		trap := mClock.Trap().Now()
+		defer trap.Close()
+		returned := make(chan struct{})
+		go func() {
+			defer close(returned)
+			mClock.Now()
+		}()
+		c, err := trap.Wait(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.MustRelease(expired)
+		select {
+		case <-returned:
+		case <-ctx.Done():
+			t.Fatal("the call did not return after MustRelease")
+		}
+		wantMessages(t, tb.messages, "MustRelease of Now([]): context already expired")
+	})
 }
 
 // Test_UnreleasedCalls verifies that Close fails the test only when a trapped call has not been

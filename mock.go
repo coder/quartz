@@ -739,7 +739,7 @@ func (c *Call) releaseError(err error) error {
 func (c *Call) MustRelease(ctx context.Context) {
 	if err := c.Release(ctx); err != nil {
 		c.tb.Helper()
-		c.tb.Fatal(err.Error())
+		c.tb.Fatalf("MustRelease of %s: %s", c.apiCall, err)
 	}
 }
 
