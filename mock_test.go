@@ -870,8 +870,8 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 			t.Parallel()
 			mClock := quartz.NewMock(t)
 			parent, parentCancel := context.WithCancel(context.Background())
-			// The parent's cancel starts a goroutine for each mock context, so with many of them the
-			// observer reads some while their goroutine is still canceling them.
+			// The parent's cancel starts a goroutine for each mock context, so with many of them
+			// the observer reads some while their goroutine is still canceling them.
 			var ctxs []context.Context
 			for range 200 {
 				ctx, cancel := mClock.WithTimeout(parent, time.Hour)
