@@ -211,7 +211,7 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 	if len(traps) == 0 {
 		return
 	}
-	c.traps = len(traps)
+	c.trapCount = len(traps)
 	c.releases.Add(len(traps))
 	m.mu.Unlock()
 	for _, t := range traps {
@@ -233,25 +233,33 @@ type AdvanceWaiter struct {
 	ch chan struct{}
 }
 
-// Wait for all timers and ticks to complete, or until context expires. If the context has expired,
-// Wait returns its error even if the timers and ticks have also completed. To check whether they
-// have completed without a deadline, use Done.
+// Wait for all timers and ticks to complete, or until context expires.
+// If ctx has expired, Wait returns its error even if the advance has completed. To check for
+// completion without a deadline, use Done.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-w.ch:
 	case <-ctx.Done():
 	}
 	// select picks a random ready case. Checking ctx afterwards makes an expired context fail the
-	// same way whether or not the timers and ticks completed first.
+	// same way whether or not the advance completed first.
 	return ctx.Err()
 }
 
 // MustWait waits for all timers and ticks to complete, and fails the test immediately if the
-// context expires, even if they have also completed.  MustWait must be called from the goroutine
+// context expires, even if the advance has completed.  MustWait must be called from the goroutine
 // running the test or benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
 	w.tb.Helper()
-	if err := w.Wait(ctx); err != nil {
+	err := w.Wait(ctx)
+	if err == nil {
+		return
+	}
+	select {
+	case <-w.ch:
+		w.tb.Fatalf("context expired, although the clock advance completed; was the context "+
+			"already expired when MustWait was called?: %s", err)
+	default:
 		w.tb.Fatalf("context expired while waiting for clock to advance: %s", err)
 	}
 }
@@ -643,8 +651,8 @@ type apiCall struct {
 	fn       clockFunction
 	releases sync.WaitGroup
 	complete chan struct{}
-	// traps is the number of traps that caught the call.
-	traps int
+	// trapCount is the number of traps that caught the call.
+	trapCount int
 }
 
 func (a *apiCall) String() string {
@@ -690,7 +698,8 @@ type Call struct {
 }
 
 // Release the call and wait for it to complete. If the provided context expires before the call completes, it returns
-// an error. If the context has already expired, Release still releases the call, and returns the error.
+// an error.
+// If the context has already expired, Release still releases the call and returns the error.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
@@ -715,9 +724,9 @@ func (c *Call) Release(ctx context.Context) error {
 }
 
 func (c *Call) releaseError(err error) error {
-	if c.apiCall.traps > 1 {
-		return fmt.Errorf("timed out waiting for the call to complete; %d traps caught it and each "+
-			"must release it: %w", c.apiCall.traps, err)
+	if c.apiCall.trapCount > 1 {
+		return fmt.Errorf("timed out waiting for the call to complete; %d traps caught it, "+
+			"and each must release it from its own goroutine: %w", c.apiCall.trapCount, err)
 	}
 	return fmt.Errorf("timed out waiting for the call to complete after release: %w", err)
 }

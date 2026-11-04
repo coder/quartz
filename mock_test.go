@@ -557,31 +557,38 @@ func Test_WithLogger(t *testing.T) {
 
 type captureFailTB struct {
 	failed bool
+	// messages holds the failure messages, in order.
+	messages []string
 	testing.TB
 }
 
 func (t *captureFailTB) Errorf(format string, args ...any) {
 	t.Helper()
 	t.Logf(format, args...)
-	t.failed = true
+	t.fail(fmt.Sprintf(format, args...))
 }
 
 func (t *captureFailTB) Error(args ...any) {
 	t.Helper()
 	t.Log(args...)
-	t.failed = true
+	t.fail(fmt.Sprint(args...))
 }
 
 func (t *captureFailTB) Fatal(args ...any) {
 	t.Helper()
 	t.Log(args...)
-	t.failed = true
+	t.fail(fmt.Sprint(args...))
 }
 
 func (t *captureFailTB) Fatalf(format string, args ...any) {
 	t.Helper()
 	t.Logf(format, args...)
+	t.fail(fmt.Sprintf(format, args...))
+}
+
+func (t *captureFailTB) fail(msg string) {
 	t.failed = true
+	t.messages = append(t.messages, msg)
 }
 
 func (t *captureFailTB) Fail() {
@@ -709,7 +716,8 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 
 	t.Run("Completed", func(t *testing.T) {
 		t.Parallel()
-		mClock := quartz.NewMock(t)
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
 		// A Wait that picks at random between completion and ctx.Done fails only half the
 		// iterations, so repeat.
 		for range 100 {
@@ -719,6 +727,12 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 				t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
 			}
 		}
+
+		mClock.Advance(time.Second).MustWait(expired)
+		const want = "although the clock advance completed"
+		if len(tb.messages) != 1 || !strings.Contains(tb.messages[0], want) {
+			t.Fatalf("MustWait() failures = %q, want one containing %q", tb.messages, want)
+		}
 	})
 
 	t.Run("Pending", func(t *testing.T) {
@@ -726,23 +740,34 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		mClock := quartz.NewMock(t)
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
 		release := make(chan struct{})
 		// The advance cannot complete until the AfterFunc returns.
 		mClock.AfterFunc(time.Second, func() { <-release })
 		w := mClock.Advance(time.Second)
 		errs := make(chan error, 1)
-		go func() { errs <- w.Wait(expired) }()
+		go func() {
+			err := w.Wait(expired)
+			w.MustWait(expired)
+			errs <- err
+		}()
 		select {
 		case err := <-errs:
 			close(release)
-			w.MustWait(ctx)
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
 			}
 		case <-ctx.Done():
 			close(release)
-			t.Fatal("Wait() did not return after the context expired")
+			t.Fatal("Wait() or MustWait() did not return after the context expired")
+		}
+		const want = "while waiting for clock to advance"
+		if len(tb.messages) != 1 || !strings.Contains(tb.messages[0], want) {
+			t.Fatalf("MustWait() failures = %q, want one containing %q", tb.messages, want)
+		}
+		if err := w.Wait(ctx); err != nil {
+			t.Fatal(err)
 		}
 	})
 }
