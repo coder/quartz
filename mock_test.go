@@ -9,6 +9,7 @@ import (
 	"runtime/pprof"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/quartz"
@@ -508,46 +509,105 @@ func (l *testLogger) Logf(format string, args ...any) {
 	l.calls = append(l.calls, fmt.Sprintf(format, args...))
 }
 
-func TestTimerStop_Go123(t *testing.T) {
+// TestTimer_StopAndReset checks what Stop and Reset return for a timer that has fired, and that
+// no value is received after they return and Reset's schedule stays, as with a time.Timer.
+func TestTimer_StopAndReset(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	fired := func(ctx context.Context, m *quartz.Mock) *quartz.Timer {
+		tmr := m.NewTimer(time.Second)
+		m.Advance(time.Second).MustWait(ctx)
+		return tmr
+	}
+	received := func(ctx context.Context, m *quartz.Mock) *quartz.Timer {
+		tmr := fired(ctx, m)
+		<-tmr.C
+		return tmr
+	}
+	// NewTimer(0) fires from a new goroutine, which can run before or after the call.
+	zeroDuration := func(_ context.Context, m *quartz.Mock) *quartz.Timer {
+		return m.NewTimer(0)
+	}
+	// Advance fires the timer from a new goroutine, which can run before or after the call.
+	advancing := func(_ context.Context, m *quartz.Mock) *quartz.Timer {
+		tmr := m.NewTimer(time.Second)
+		_ = m.Advance(time.Second)
+		return tmr
+	}
+	stop := func(tmr *quartz.Timer) bool { return tmr.Stop() }
+	reset := func(tmr *quartz.Timer) bool { return tmr.Reset(time.Hour) }
+	for _, tc := range []struct {
+		name  string
+		start func(context.Context, *quartz.Mock) *quartz.Timer
+		call  func(*quartz.Timer) bool
+		want  bool
+		// wantNext is how long after the call the timer fires, or 0 if it does not.
+		wantNext time.Duration
+	}{
+		// Stop returning true here keeps if !t.Stop() { <-t.C } from blocking.
+		{name: "StopFiredUnread", start: fired, call: stop, want: true},
+		{name: "StopFiredReceived", start: received, call: stop, want: false},
+		{name: "ResetFiredUnread", start: fired, call: reset, want: true, wantNext: time.Hour},
+		{name: "StopZeroDuration", start: zeroDuration, call: stop, want: true},
+		{
+			name: "ResetZeroDuration", start: zeroDuration, call: reset,
+			want: true, wantNext: time.Hour,
+		},
+		{name: "StopDuringAdvance", start: advancing, call: stop, want: true},
+		{
+			name: "ResetDuringAdvance", start: advancing, call: reset,
+			want: true, wantNext: time.Hour,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-	mClock := quartz.NewMock(t)
-
-	tmr := mClock.NewTimer(1 * time.Second)
-	mClock.Advance(1 * time.Second).MustWait(ctx)
-	if tmr.Stop() {
-		t.Fatal("timer hadn't already been active")
+				mClock := quartz.NewMock(t)
+				tmr := tc.start(ctx, mClock)
+				if got := tc.call(tmr); got != tc.want {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+				// Lets any goroutine that could still send on C run before the checks.
+				synctest.Wait()
+				select {
+				case tme := <-tmr.C:
+					t.Errorf("received %s after the call returned", tme)
+				default:
+				}
+				if next, _ := mClock.Peek(); next != tc.wantNext {
+					t.Errorf("timer fires in %s, want %s", next, tc.wantNext)
+				}
+			})
+		})
 	}
 
-	select {
-	case tme := <-tmr.C:
-		t.Fatalf("got channel read after stop: %s", tme)
-	default:
-		// OK!
-	}
-}
-
-func TestTimerReset_Go123(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	mClock := quartz.NewMock(t)
-
-	tmr := mClock.NewTimer(1 * time.Second)
-	mClock.Advance(1 * time.Second).MustWait(ctx)
-	if tmr.Reset(1 * time.Second) {
-		t.Fatal("timer hadn't already been active")
-	}
-
-	select {
-	case tme := <-tmr.C:
-		t.Fatalf("got channel read after stop: %s", tme)
-	default:
-		// OK!
-	}
+	// A time.AfterFunc timer's Stop returns true if f never runs, and false if f has started.
+	// AfterFunc(0) runs f from a new goroutine, and Stop usually gets the Mock's lock before it:
+	// the goroutine gets it first in a few in ten thousand runs with -race. No Mock call can hold
+	// that goroutine back, so this accepts either order and checks that Stop's result agrees with
+	// whether f ran.
+	t.Run("StopAfterFuncZeroDuration", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			ran := make(chan struct{})
+			tmr := quartz.NewMock(t).AfterFunc(0, func() { close(ran) })
+			stopped := tmr.Stop()
+			// Lets f's goroutine run before the check.
+			synctest.Wait()
+			select {
+			case <-ran:
+				if stopped {
+					t.Error("f ran, but Stop returned true")
+				}
+			default:
+				if !stopped {
+					t.Error("f has not run, but Stop returned false")
+				}
+			}
+		})
+	})
 }
 
 // TestTimerReset_NegativeDuration verifies that resetting a still-active timer
@@ -591,16 +651,142 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 }
 
+// TestTimer_ReadableDuringCleanup checks that a cleanup registered after NewMock, which runs before
+// NewMock's cleanup, can still receive from a timer that fired during the test. Tests that stop a
+// server in such a cleanup rely on this when a worker reads the timer on its way out.
+func TestTimer_ReadableDuringCleanup(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		mClock := quartz.NewMock(t)
+		busy := make(chan struct{})
+		quit := make(chan struct{})
+		exited := make(chan struct{})
+		// Stands in for a server's Close: it unblocks the worker and waits for it to exit. Bubble
+		// time moves once every goroutine is blocked, so a worker that never receives fails the
+		// test at once. quit then lets the worker exit, so the bubble can end.
+		t.Cleanup(func() {
+			close(busy)
+			select {
+			case <-exited:
+			case <-time.After(10 * time.Second):
+				t.Error("worker did not receive the timer value during cleanup")
+			}
+			close(quit)
+		})
+		tmr := mClock.NewTimer(time.Second)
+		go func() {
+			defer close(exited)
+			<-busy
+			select {
+			case <-tmr.C:
+			case <-quit:
+			}
+		}()
+		mClock.Advance(time.Second).MustWait(ctx)
+	})
+}
+
+// TestTimer_ReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup
+// runs receives the value of a timer that fires just before or after that cleanup. synctest.Wait
+// makes sure the reader is waiting before the timer fires and that the send has ended before the
+// check.
+func TestTimer_ReaderWaitingAtMockCleanup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		fireAfterCleanup bool
+	}{
+		// The test fires the timer as its last step. In a bubble, the goroutine that sends the
+		// value often starts only after NewMock's cleanup is waiting to end it.
+		{name: "FiredBeforeCleanup"},
+		{name: "FiredAfterCleanup", fireAfterCleanup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// When the sending goroutine starts late, select picks at random between the reader
+			// and the cleanup, so a send that does not try the reader first loses the value about
+			// half the time. Each round is a new bubble, so without the race detector, which
+			// changes scheduling, the test then fails in nearly every run.
+			for range 10 {
+				synctest.Test(t, func(t *testing.T) {
+					var mClock *quartz.Mock
+					received := make(chan struct{}, 1)
+					quit := make(chan struct{})
+					// Registered before NewMock, so it runs after NewMock's cleanup.
+					t.Cleanup(func() {
+						if tc.fireAfterCleanup {
+							mClock.Advance(time.Second)
+						}
+						synctest.Wait()
+						close(quit)
+						if len(received) == 0 {
+							t.Error("the waiting reader did not receive the timer value")
+						}
+					})
+					mClock = quartz.NewMock(t)
+					tmr := mClock.NewTimer(time.Second)
+					go func() {
+						select {
+						case <-tmr.C:
+							received <- struct{}{}
+						case <-quit:
+						}
+					}()
+					synctest.Wait()
+					if !tc.fireAfterCleanup {
+						mClock.Advance(time.Second).MustWait(context.Background())
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestNoLeak_Go123 relies on verifyNoLeakTestMain to report goroutines that outlive the tests.
 func TestNoLeak_Go123(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
-	mClock := quartz.NewMock(t)
+	t.Run("FiredDuringTest", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	_ = mClock.NewTimer(1 * time.Second)
-	_ = mClock.NewTicker(1 * time.Second)
-	mClock.Advance(1 * time.Second).MustWait(ctx)
+		mClock := quartz.NewMock(t)
+
+		_ = mClock.NewTimer(1 * time.Second)
+		_ = mClock.NewTicker(1 * time.Second)
+		mClock.Advance(1 * time.Second).MustWait(ctx)
+	})
+
+	// NewTimer(0) and Reset(0) each fire the timer from a new goroutine, and in most of 100 rounds
+	// both run after Reset. Only one of them may start a write: the Mock tracks one write per
+	// timer, so its cleanup would not end a second one.
+	t.Run("ZeroDurationTimerResetToZero", func(t *testing.T) {
+		t.Parallel()
+		for range 100 {
+			tmr := quartz.NewMock(t).WithLogger(quartz.NoOpLogger).NewTimer(0)
+			tmr.Reset(0)
+		}
+	})
+
+	// A test that stops waiting on an Advance can end before its timers fire.
+	t.Run("TimerFiredAfterTestEnds", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var mClock *quartz.Mock
+		t.Run("Inner", func(t *testing.T) {
+			mClock = quartz.NewMock(t)
+			_ = mClock.NewTimer(time.Second)
+		})
+		if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestTickerStop_Go123(t *testing.T) {

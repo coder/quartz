@@ -30,6 +30,9 @@ type Mock struct {
 	logger   Logger
 	mu       sync.Mutex
 	testOver bool
+	// writes holds the timers that have a goroutine sending their fired value on C. The cleanup
+	// registered in NewMock ends those goroutines.
+	writes map[*Timer]struct{}
 
 	// cur is the current time
 	cur time.Time
@@ -68,9 +71,10 @@ func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, 
 	return t
 }
 
-// NewTicker creates a mocked ticker attached to this Mock. Note that it will cease sending ticks on its channel at the
-// end of the test, to avoid leaking any goroutines. Ticks are suppressed even if the mock clock is advanced after the
-// test completes. Best practice is to only manipulate the mock time in the main goroutine of the test.
+// NewTicker creates a mocked ticker attached to this Mock. The ticker stops sending ticks when the
+// cleanup that NewTicker registers runs, and advancing the clock after that sends none. A Reset
+// after that cleanup starts the ticker again, and only Stop ends it then. Best practice is to only
+// manipulate the mock time in the main goroutine of the test.
 func (m *Mock) NewTicker(d time.Duration, tags ...string) *Ticker {
 	if d <= 0 {
 		panic("NewTicker called with negative or zero duration")
@@ -99,6 +103,7 @@ func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
+		t.nxt = m.cur
 		go t.fire(t.mock.cur)
 		return t
 	}
@@ -120,6 +125,7 @@ func (m *Mock) AfterFunc(d time.Duration, f func(), tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
+		t.nxt = m.cur
 		go t.fire(t.mock.cur)
 		return t
 	}
@@ -480,6 +486,13 @@ func (m *Mock) WithLogger(l Logger) *Mock {
 // NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
 // You may re-set the time earlier than this, but only before timers or tickers
 // are created.
+//
+// Cleanups registered after NewMock run before NewMock's own cleanup, so they can still receive
+// the value of a timer that fired during the test. NewMock's cleanup drops timer values that have
+// not been received, and a timer from NewTimer that fires after it sends only to a reader already
+// waiting on C. Call NewMock before registering cleanups that wait for code reading the Mock's
+// timers. Ticks from NewTicker stop earlier, unless Reset starts the ticker again; see
+// [Mock.NewTicker].
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {
@@ -489,11 +502,15 @@ func NewMock(tb TestingT) *Mock {
 		tb:     tb,
 		logger: tb,
 		cur:    cur,
+		writes: make(map[*Timer]struct{}),
 	}
 	tb.Cleanup(func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.testOver = true
+		for t := range m.writes {
+			t.endWriteLocked()
+		}
 		m.logger.Logf("Mock Clock - test cleanup; will no longer log clock events")
 	})
 	return m
