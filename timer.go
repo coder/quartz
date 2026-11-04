@@ -16,6 +16,7 @@ type Timer struct {
 	mock    *Mock       // mock clock, if set
 	fn      func()      // AfterFunc function, if set
 	stopped bool        // True if stopped, false if running
+	src     eventSource // mock call that created the timer
 
 	// As of Go 1.23, timer channels are unbuffered and guaranteed to block forever after a call to stop.
 	//
@@ -58,6 +59,10 @@ func (t *Timer) fire(tt time.Time) {
 
 func (t *Timer) next() time.Time {
 	return t.nxt
+}
+
+func (t *Timer) describe() string {
+	return t.src.describe("timer")
 }
 
 // Stop prevents the Timer from firing. It returns true if the call stops the timer, false if the

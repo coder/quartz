@@ -65,8 +65,10 @@ mClock.Set(time.Date(2021, 6, 18, 12, 0, 0, 0, time.UTC)) // June 18, 2021 @ 12p
 
 #### Advancing the clock
 
-Once you begin setting timers or tickers, you cannot change the time backward, only advance it
-forward. You may continue to use `Set()`, but it is often easier and clearer to use `Advance()`.
+While a timer, ticker, or [mock context](#contexts) is scheduled, you cannot change the time
+backward, only advance it forward. A timer is scheduled until it fires or is stopped, a ticker until
+it is stopped, and a mock context until it expires or is canceled. You may continue to use `Set()`,
+but it is often easier and clearer to use `Advance()`.
 
 For example, with a timer:
 
@@ -80,8 +82,8 @@ mClock.Advance(time.Second)
 ```
 
 When you call `Advance()` it immediately moves the clock forward the given amount, and triggers any
-tickers or timers that are scheduled to happen at that time. Any triggered events happen on separate
-goroutines, so _do not_ immediately assert the results:
+tickers, timers, or mock contexts that are scheduled to happen at that time. Any triggered events
+happen on separate goroutines, so _do not_ immediately assert the results:
 
 ```go
 fired := false
@@ -146,7 +148,8 @@ mClock.Advance(time.Second).MustWait(ctx)
 ### Advance only to the next event
 
 One important restriction on advancing the clock is that you may only advance forward to the next
-timer or ticker event and no further. The following will result in a test failure:
+event and no further. Timers, tickers, and pending [mock contexts](#contexts) are events. The
+following will result in a test failure:
 
 ```go
 func TestAdvanceTooFar(t *testing.T) {
@@ -159,6 +162,12 @@ func TestAdvanceTooFar(t *testing.T) {
 	})
 	mClock.Advance(2*time.Second).MustWait(ctx)
 }
+```
+
+The failure names the events that stop the clock and the calls that created them:
+
+```
+cannot advance 2s which is beyond next event in 1s: timer from AfterFunc(..., [])
 ```
 
 This is a deliberate design decision to allow `Advance()` to immediately and synchronously move the
@@ -186,7 +195,7 @@ w.MustWait(ctx)
 ```
 
 `d, ok := Peek()` returns the duration until the next event, if any (`ok` is `true`). You can use
-this to advance a specific time, regardless of the tickers and timer events:
+this to advance a specific time, regardless of the scheduled events:
 
 ```go
 desired := time.Minute // time to advance
@@ -315,8 +324,8 @@ by the real clock. They also appear on all methods on returned timers and ticker
 ### Contexts
 
 `Clock` provides `WithDeadline`, `WithDeadlineCause`, `WithTimeout`, and `WithTimeoutCause` methods
-that mirror the standard `context` package. With a `*Mock`, contexts created through the clock
-expire on mock time:
+that mirror the standard `context` package. With a `*Mock`, contexts created through the clock,
+called mock contexts, expire on mock time:
 
 ```go
 ctx, cancel := mClock.WithTimeout(context.Background(), 30*time.Second)
@@ -366,6 +375,9 @@ contexts created after the test ended are returned already canceled with that ca
 
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
+
+A pending mock context also limits how far `Advance()` can move the clock; see [Advance only to the
+next event](#advance-only-to-the-next-event).
 
 #### `Deadline()` does not report mock time
 
