@@ -700,7 +700,9 @@ func (c *Call) Release(ctx context.Context) error {
 	c.trap.callReleased()
 	select {
 	case <-ctx.Done():
-		// select picks randomly among ready cases; report completion if it also happened.
+		// Unlike the waits, Release reports completion even if ctx has also expired: the release
+		// has already happened and cannot be repeated, so the result is the only way the test
+		// learns whether the call completed. select picks a random ready case, so check again.
 		select {
 		case <-c.apiCall.complete:
 			return nil
