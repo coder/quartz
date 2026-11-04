@@ -487,7 +487,7 @@ Inside a bubble:
 - Test timeouts created in a bubble, such as the `ctx` you pass to `MustWait`, run on bubble time.
   Make them longer than the bubble time that passes while they are in use: a 10-second `ctx` expires
   during a `time.Sleep(time.Minute)`. A long timeout costs no wall time: when every goroutine in the
-  bubble is durably blocked, bubble time jumps straight to it.
+  bubble is durably blocked, bubble time jumps to the earliest pending timer.
 
 ## Why another time testing library?
 
