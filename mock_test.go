@@ -366,12 +366,7 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 
 	mClock := quartz.NewMock(t)
 	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
-	derived := stdlibDescendants(t, ctx)
-	nested, nestedCancel := mClock.WithTimeout(ctx, time.Hour)
-	defer nestedCancel()
-	// Obtained before cancel so the check below does not trigger the nested context's own parent
-	// check.
-	nestedDone := nested.Done()
+	derived := descendants(t, mClock, ctx)
 
 	cancel()
 	for name, child := range derived {
@@ -382,11 +377,6 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 			t.Errorf("%s: expected Canceled cause, got %v", name, got)
 		}
 	}
-	select {
-	case <-nestedDone:
-	default:
-		t.Fatal("expected nested mock context Done to be closed")
-	}
 }
 
 type ctxKey struct{}
@@ -395,18 +385,28 @@ type ctxKey struct{}
 // libraries do.
 type embeddingCtx struct{ context.Context }
 
-// stdlibDescendants returns contexts that context.WithCancel derives from ctx directly and through
-// layers that do not cancel. Stdlib cancels each of them before the call that cancels ctx returns.
-func stdlibDescendants(t *testing.T, ctx context.Context) map[string]context.Context {
-	derive := func(parent context.Context) context.Context {
+// descendants returns contexts derived from ctx directly and through layers that do not cancel,
+// each done before the call that cancels ctx returns. The Mock cases derive a mock context and
+// return a stdlib context derived from it: reading the mock context itself would check its parent
+// and cancel it, hiding a missed notification.
+func descendants(t *testing.T, mClock *quartz.Mock, ctx context.Context) map[string]context.Context {
+	withCancel := func(parent context.Context) context.Context {
 		child, cancel := context.WithCancel(parent)
 		t.Cleanup(cancel)
 		return child
 	}
+	throughMock := func(parent context.Context) context.Context {
+		nested, cancel := mClock.WithTimeout(parent, time.Hour)
+		t.Cleanup(cancel)
+		return withCancel(nested)
+	}
 	return map[string]context.Context{
-		"Direct":    derive(ctx),
-		"WithValue": derive(context.WithValue(ctx, ctxKey{}, "v")),
-		"Embedding": derive(embeddingCtx{ctx}),
+		"Direct":        withCancel(ctx),
+		"WithValue":     withCancel(context.WithValue(ctx, ctxKey{}, "v")),
+		"Embedding":     withCancel(embeddingCtx{ctx}),
+		"Mock":          throughMock(ctx),
+		"MockWithValue": throughMock(context.WithValue(ctx, ctxKey{}, "v")),
+		"MockEmbedding": throughMock(embeddingCtx{ctx}),
 	}
 }
 
@@ -643,6 +643,50 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 	}
 }
 
+// When a parent that is not a mock context is canceled, a mock context learns of it on another
+// goroutine, so a Done channel obtained before, and the Done of a derived context, close a moment
+// later.
+func TestWithTimeout_ParentCanceledClosesDone(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]func(t *testing.T, mClock *quartz.Mock) (context.Context, context.CancelFunc){
+		"Stdlib": func(*testing.T, *quartz.Mock) (context.Context, context.CancelFunc) {
+			return context.WithCancel(context.Background())
+		},
+		// The stdlib layer can be canceled without the mock context behind it, so the child must
+		// not register with that mock context.
+		"WithCancelOfMock": func(t *testing.T, mClock *quartz.Mock) (context.Context, context.CancelFunc) {
+			mockParent, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+			t.Cleanup(cancel)
+			return context.WithCancel(mockParent)
+		},
+	}
+	for name, newParent := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+
+			mClock := quartz.NewMock(t)
+			parent, parentCancel := newParent(t, mClock)
+			ctx, cancel := mClock.WithTimeout(parent, time.Hour)
+			defer cancel()
+			child, childCancel := context.WithCancel(ctx)
+			defer childCancel()
+			ctxDone := ctx.Done()
+
+			parentCancel()
+			for name, done := range map[string]<-chan struct{}{"ctx": ctxDone, "child": child.Done()} {
+				select {
+				case <-done:
+				case <-testCtx.Done():
+					t.Fatalf("%s: Done did not close after the parent was canceled", name)
+				}
+			}
+		})
+	}
+}
+
 // A context created from a done parent reports the parent's error and cause, as stdlib children do.
 func TestWithTimeout_ParentAlreadyDone(t *testing.T) {
 	t.Parallel()
@@ -723,7 +767,7 @@ func TestWithTimeoutCause_Cause(t *testing.T) {
 	expectedErr := errors.New("deadline cause")
 	ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, expectedErr)
 	defer cancel()
-	derived := stdlibDescendants(t, ctx)
+	derived := descendants(t, mClock, ctx)
 
 	mClock.Advance(time.Second).MustWait(testCtx)
 

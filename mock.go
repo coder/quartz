@@ -220,8 +220,11 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 		c.cancel(context.DeadlineExceeded, cause)
 	}
 	var stop func() bool
-	if p, ok := parent.(*mockCtxView); ok {
-		// Run synchronously when the parent is canceled, as stdlib children do.
+	// Register with the nearest mock context, also behind layers that forward Done and Value such
+	// as context.WithValue, so c is canceled before that context's cancellation returns, as stdlib
+	// children are. A different Done channel means a layer between them can be canceled on its own,
+	// as in stdlib's parentCancelCtx, so c registers with parent instead.
+	if p, ok := parent.Value(mockCtxViewKey{}).(*mockCtxView); ok && parent.Done() == p.std.Done() {
 		stop = p.c.AfterFunc(c.checkParent)
 	} else {
 		stop = context.AfterFunc(parent, c.checkParent)
@@ -752,9 +755,10 @@ type afterFunc struct{ f func() }
 var noWallDeadline = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 // AfterFunc lets the stdlib context behind c's mockCtxView, and mock contexts created from that
-// view, register for cancellation instead of each starting a goroutine that waits on Done (see
-// context.afterFuncer). Registered functions run before the call that cancels c returns, so those
-// contexts are done by the time cancel() or Advance().MustWait() returns.
+// view directly or through layers that forward Done and Value, register for cancellation instead
+// of each starting a goroutine that waits on Done (see context.afterFuncer). Registered functions
+// run before the call that cancels c returns, so those contexts are done by the time cancel() or
+// Advance().MustWait() returns.
 func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
 	c.mock.mu.Lock()
 	defer c.mock.mu.Unlock()
@@ -793,6 +797,10 @@ type mockCtxView struct {
 	c   *mockCtx
 }
 
+// mockCtxViewKey is the Value key under which a mockCtxView returns itself, so newMockCtx can find
+// the nearest mock context behind layers such as context.WithValue.
+type mockCtxViewKey struct{}
+
 func (v *mockCtxView) Deadline() (time.Time, bool) {
 	return v.c.Deadline()
 }
@@ -808,6 +816,9 @@ func (v *mockCtxView) Done() <-chan struct{} {
 }
 
 func (v *mockCtxView) Value(key any) any {
+	if key == (mockCtxViewKey{}) {
+		return v
+	}
 	v.checkParent()
 	return v.std.Value(key)
 }
