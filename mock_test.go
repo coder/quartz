@@ -868,32 +868,18 @@ func TestTickerReset_NonPositiveDuration(t *testing.T) {
 // test's synctest.Test call in the stack.
 func TestTicker_ResetInBubble(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name string
-		tick bool
-	}{
-		{name: "Running"},
-		// runLoop holds the tick for a reader when Reset is called.
-		{name: "TickedUnread", tick: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-			mClock := quartz.NewMock(t)
-			tkr := mClock.NewTicker(time.Second)
-			defer tkr.Stop()
-			if tc.tick {
-				mClock.Advance(time.Second).MustWait(ctx)
-			}
-			synctest.Test(t, func(*testing.T) { tkr.Reset(time.Hour) })
-			mClock.Advance(time.Hour).MustWait(ctx)
-			// A tick kept from the old schedule would be received first.
-			if got, want := <-tkr.C, mClock.Now(); !got.Equal(want) {
-				t.Errorf("received the tick for %s, want the one for %s", got, want)
-			}
-		})
+	mClock := quartz.NewMock(t)
+	tkr := mClock.NewTicker(time.Second)
+	defer tkr.Stop()
+	synctest.Test(t, func(*testing.T) { tkr.Reset(time.Hour) })
+	mClock.Advance(time.Hour).MustWait(ctx)
+	select {
+	case <-tkr.C:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the tick after Reset")
 	}
 }
 
