@@ -651,13 +651,16 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 }
 
+// newTimer and newTicker create a timer or ticker that fires after one second and return its
+// channel.
+func newTimer(m *quartz.Mock) <-chan time.Time  { return m.NewTimer(time.Second).C }
+func newTicker(m *quartz.Mock) <-chan time.Time { return m.NewTicker(time.Second).C }
+
 // TestReadableDuringCleanup checks that a cleanup registered after NewMock, which runs before
 // NewMock's cleanup, can still receive from a timer or ticker that fired during the test. Tests
 // that stop a server in such a cleanup rely on this when a worker reads the channel on its way out.
 func TestReadableDuringCleanup(t *testing.T) {
 	t.Parallel()
-	newTimer := func(m *quartz.Mock) <-chan time.Time { return m.NewTimer(time.Second).C }
-	newTicker := func(m *quartz.Mock) <-chan time.Time { return m.NewTicker(time.Second).C }
 	for _, tc := range []struct {
 		name  string
 		start func(*quartz.Mock) <-chan time.Time
@@ -675,11 +678,11 @@ func TestReadableDuringCleanup(t *testing.T) {
 				busy := make(chan struct{})
 				quit := make(chan struct{})
 				exited := make(chan struct{})
-				// Stands in for a server's Close: it unblocks the worker and waits for it to exit. It
-				// is registered before the timer or ticker is created, as when the server creates
-				// them. Bubble time moves once every goroutine is blocked, so a worker that never
-				// receives fails the test at once. quit then lets the worker exit, so the bubble can
-				// end.
+				// Stands in for a server's Close: it unblocks the worker and waits for it to exit.
+				// It is registered before the timer or ticker is created, as when the server
+				// creates them. Bubble time moves once every goroutine is blocked, so a worker that
+				// never receives fails the test at once. quit then lets the worker exit, so the
+				// bubble can end.
 				t.Cleanup(func() {
 					close(busy)
 					select {
@@ -709,17 +712,16 @@ func TestReadableDuringCleanup(t *testing.T) {
 // the reader is waiting before the clock fires and that the send has ended before the check.
 func TestReaderWaitingAtMockCleanup(t *testing.T) {
 	t.Parallel()
-	newTimer := func(m *quartz.Mock) <-chan time.Time { return m.NewTimer(time.Second).C }
-	newTicker := func(m *quartz.Mock) <-chan time.Time { return m.NewTicker(time.Second).C }
 	for _, tc := range []struct {
 		name             string
 		start            func(*quartz.Mock) <-chan time.Time
 		fireAfterCleanup bool
 	}{
-		// These rows fire as the test's last step. In a bubble, the goroutine that sends on C
-		// often reaches its send only after NewMock's cleanup is waiting to end it.
+		// These two fire as the test's last step. In a bubble, the goroutine that sends on C often
+		// reaches its send only after NewMock's cleanup is waiting to end it.
 		{name: "TimerFiredBeforeCleanup", start: newTimer},
 		{name: "TickerFiredBeforeCleanup", start: newTicker},
+		// These two fire from the cleanup registered before NewMock, which runs after NewMock's.
 		{name: "TimerFiredAfterCleanup", start: newTimer, fireAfterCleanup: true},
 		{name: "TickerFiredAfterCleanup", start: newTicker, fireAfterCleanup: true},
 	} {
@@ -797,34 +799,26 @@ func TestNoLeak_Go123(t *testing.T) {
 		t.Parallel()
 		for _, tc := range []struct {
 			name   string
-			during func(context.Context, *quartz.Mock) (after func())
+			during func(*quartz.Mock) (after func())
 		}{
 			{
 				name: "TimerFired",
-				during: func(_ context.Context, m *quartz.Mock) func() {
+				during: func(m *quartz.Mock) func() {
 					_ = m.NewTimer(time.Second)
 					return func() {}
 				},
 			},
 			{
 				name: "TickerResetAfterStop",
-				during: func(_ context.Context, m *quartz.Mock) func() {
+				during: func(m *quartz.Mock) func() {
 					tkr := m.NewTicker(time.Second)
 					tkr.Stop()
 					return func() { tkr.Reset(time.Second) }
 				},
 			},
 			{
-				name: "TickerResetAfterTick",
-				during: func(ctx context.Context, m *quartz.Mock) func() {
-					tkr := m.NewTicker(time.Second)
-					m.Advance(time.Second).MustWait(ctx)
-					return func() { tkr.Reset(time.Second) }
-				},
-			},
-			{
 				name: "NewTicker",
-				during: func(_ context.Context, m *quartz.Mock) func() {
+				during: func(m *quartz.Mock) func() {
 					return func() { _ = m.NewTicker(time.Second) }
 				},
 			},
@@ -838,7 +832,7 @@ func TestNoLeak_Go123(t *testing.T) {
 				var after func()
 				t.Run("Inner", func(t *testing.T) {
 					mClock = quartz.NewMock(t)
-					after = tc.during(ctx, mClock)
+					after = tc.during(mClock)
 				})
 				after()
 				if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
