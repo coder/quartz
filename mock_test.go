@@ -410,9 +410,10 @@ func stdlibDescendants(t *testing.T, ctx context.Context) map[string]context.Con
 	}
 }
 
-// stallingParent is a parent that is never canceled and whose AfterFunc stop function blocks until
-// release is closed. An expiring mock context calls that stop function after it is done and before
-// its derived contexts are, so a test can act in between.
+// stallingParent is a parent whose Done never closes and whose AfterFunc stop function blocks until
+// release is closed. A mock context calls that stop function while it is being canceled, so a test
+// can act while another goroutine is canceling it. Canceling the embedded context makes Err and
+// Cause report the parent done without notifying the mock context.
 type stallingParent struct {
 	context.Context
 	stopping chan struct{}
@@ -430,35 +431,90 @@ func (p *stallingParent) AfterFunc(func()) func() bool {
 	}
 }
 
-// Like stdlib's cancel, cancel returns after derived contexts are done, also when an expiry on
-// another goroutine has marked the context done and not yet reached them.
-func TestWithTimeout_CancelDuringExpiry(t *testing.T) {
+// When cancel is called while another goroutine is canceling the context, cancel returns after
+// derived contexts are done, and they report that goroutine's error and cause, as with stdlib.
+func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
 
-	mClock := quartz.NewMock(t)
-	parent := &stallingParent{
-		Context:  context.Background(),
-		stopping: make(chan struct{}),
-		release:  make(chan struct{}),
+	deadlineCause := errors.New("deadline cause")
+	parentCause := errors.New("parent cause")
+	tests := map[string]struct {
+		// startCanceling starts canceling the context on another goroutine and returns a function
+		// that waits for that goroutine.
+		startCanceling func(testCtx context.Context, mClock *quartz.Mock,
+			cancel context.CancelFunc, cancelParent context.CancelCauseFunc) (wait func())
+		wantErr   error
+		wantCause error
+	}{
+		"Expiry": {
+			startCanceling: func(testCtx context.Context, mClock *quartz.Mock,
+				_ context.CancelFunc, _ context.CancelCauseFunc,
+			) func() {
+				w := mClock.Advance(time.Second)
+				return func() { w.MustWait(testCtx) }
+			},
+			wantErr:   context.DeadlineExceeded,
+			wantCause: deadlineCause,
+		},
+		// The first cancel finds the parent done and takes its error and cause.
+		"ParentCanceled": {
+			startCanceling: func(_ context.Context, _ *quartz.Mock,
+				cancel context.CancelFunc, cancelParent context.CancelCauseFunc,
+			) func() {
+				cancelParent(parentCause)
+				done := make(chan struct{})
+				go func() {
+					cancel()
+					close(done)
+				}()
+				return func() { <-done }
+			},
+			wantErr:   context.Canceled,
+			wantCause: parentCause,
+		},
 	}
-	ctx, cancel := mClock.WithTimeout(parent, time.Second)
-	child, childCancel := context.WithCancel(ctx)
-	defer childCancel()
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
 
-	w := mClock.Advance(time.Second)
-	select {
-	case <-parent.stopping:
-	case <-testCtx.Done():
-		t.Fatal("timed out waiting for the expiry to stop the parent registration")
-	}
-	cancel()
-	err := child.Err()
-	close(parent.release)
-	w.MustWait(testCtx)
-	if err == nil {
-		t.Fatal("expected the derived context to be done when cancel returned")
+			mClock := quartz.NewMock(t)
+			root, cancelRoot := context.WithCancelCause(context.Background())
+			defer cancelRoot(nil)
+			parent := &stallingParent{
+				Context:  root,
+				stopping: make(chan struct{}),
+				release:  make(chan struct{}),
+			}
+			ctx, cancel := mClock.WithTimeoutCause(parent, time.Second, deadlineCause)
+			child, childCancel := context.WithCancel(ctx)
+			defer childCancel()
+
+			wait := tt.startCanceling(testCtx, mClock, cancel, cancelRoot)
+			select {
+			case <-parent.stopping:
+			case <-testCtx.Done():
+				t.Fatal("timed out waiting for the cancellation to stop the parent registration")
+			}
+			// If cancel waits for the stalled goroutine, go test -timeout reports it by naming this
+			// test.
+			cancel()
+			// Read while the other goroutine is still in the parent's stop function.
+			ctxErr, ctxCause := ctx.Err(), context.Cause(ctx)
+			childErr, childCause := child.Err(), context.Cause(child)
+			close(parent.release)
+			wait()
+
+			if !errors.Is(ctxErr, tt.wantErr) || !errors.Is(ctxCause, tt.wantCause) {
+				t.Errorf("expected context %v with cause %v, got %v with cause %v",
+					tt.wantErr, tt.wantCause, ctxErr, ctxCause)
+			}
+			if !errors.Is(childErr, tt.wantErr) || !errors.Is(childCause, tt.wantCause) {
+				t.Errorf("expected derived context %v with cause %v, got %v with cause %v",
+					tt.wantErr, tt.wantCause, childErr, childCause)
+			}
+		})
 	}
 }
 

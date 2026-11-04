@@ -234,9 +234,11 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	std, stdCancel := context.WithCancel(c)
 	return &mockCtxView{std: std, c: c}, func() {
 		c.cancel(context.Canceled, nil)
-		// c.cancel has canceled std unless another goroutine canceled c first and has not reached
-		// std yet. stdCancel makes std and its descendants done before cancel returns, as stdlib's
-		// cancel does.
+		// If another goroutine canceled c first, it cancels std with its error and cause. Wait for
+		// that, as a stdlib cancel that loses a race does. The wait does not depend on user code:
+		// c.cancel cancels std before calling into the parent. stdCancel is then a no-op, called
+		// because WithCancel requires it.
+		<-std.Done()
 		stdCancel()
 	}
 }
@@ -881,12 +883,15 @@ func (c *mockCtx) cancel(err, cause error) {
 	afterFuncs := c.afterFuncs
 	c.afterFuncs = nil
 	c.mock.mu.Unlock()
-	if stop != nil {
-		stop()
-	}
-	// Without mock.mu: derived contexts call c.Err() while canceling.
+	// Without mock.mu: derived contexts call c.Err() while canceling. They run before stop, which
+	// calls into the parent, so a slow parent cannot delay std, which mockCtxView and a cancel()
+	// that lost a race wait for. Stdlib also cancels children before it removes a context from its
+	// parent.
 	for _, a := range afterFuncs {
 		a.f()
+	}
+	if stop != nil {
+		stop()
 	}
 }
 
