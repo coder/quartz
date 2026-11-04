@@ -23,11 +23,14 @@ type TestingT interface {
 	Cleanup(func())
 }
 
-// ErrMockClockTestEnded is the context.Cause of a mock context that was still live when the test
-// ended; its Err is context.Canceled. Each context is canceled by a cleanup registered when the
-// context was created, so it is still live in cleanups registered after that, which run first. A
-// context created after the cleanup registered by NewMock has run, in a cleanup registered before
-// NewMock or by a goroutine that outlived the test, is returned already canceled with this cause.
+// ErrMockClockTestEnded is the context.Cause of a mock context that was still live when the
+// TestingT passed to NewMock ran its cleanups; its Err is context.Canceled. Each context is
+// canceled in a cleanup that it registers on that TestingT when it is created. Cleanups run last
+// registered first, so cleanups registered before the context see it canceled, unless they were
+// already running when it was created, and cleanups registered after it see it live. A subtest's
+// cleanups run before its parent's, so they see the context live when that TestingT is the
+// parent's. A context created after the cleanup registered by NewMock has run is returned already
+// canceled with this cause.
 var ErrMockClockTestEnded = errors.New("quartz: mock clock test ended")
 
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
@@ -201,6 +204,7 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 		mock:         m,
 		done:         make(chan struct{}),
 	}
+	c.testEndRef = &mockCtxRef{c: c}
 
 	m.mu.Lock()
 	m.matchCallLocked(call)
@@ -212,7 +216,18 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	if !pastDeadline {
 		m.addEventLocked(c)
 	}
-	m.tb.Cleanup(func() { c.cancel(context.Canceled, ErrMockClockTestEnded) })
+	// Each context registers its own cleanup so it is canceled before the cleanups registered
+	// before it that have not started yet (see ErrMockClockTestEnded). The cleanup holds only the
+	// ref, which cancel clears, so a done context is not kept reachable until the test ends.
+	ref := c.testEndRef
+	m.tb.Cleanup(func() {
+		m.mu.Lock()
+		live := ref.c
+		m.mu.Unlock()
+		if live != nil {
+			live.cancel(context.Canceled, ErrMockClockTestEnded)
+		}
+	})
 	close(call.complete)
 	m.mu.Unlock()
 
@@ -315,7 +330,8 @@ func (m *Mock) removeEventLocked(e event) {
 	defer m.recomputeNextLocked()
 	for i := range m.all {
 		if m.all[i] == e {
-			m.all = append(m.all[:i], m.all[i+1:]...)
+			// slices.Delete zeroes the vacated slot, so the backing array stops referencing e.
+			m.all = slices.Delete(m.all, i, i+1)
 			return
 		}
 	}
@@ -751,13 +767,17 @@ type mockCtx struct {
 	// Cause recorded when the deadline fires.
 	cause error
 
-	// err, done, afterFuncs, and stopParent are guarded by mock.mu. err and done are written
-	// together.
+	// err, done, afterFuncs, stopParent, and testEndRef.c are guarded by mock.mu. err and done are
+	// written together.
 	err        error
 	done       chan struct{}
 	afterFuncs []*afterFunc
 	stopParent func() bool
+	testEndRef *mockCtxRef
 }
+
+// mockCtxRef refers to a mock context until cancel clears it.
+type mockCtxRef struct{ c *mockCtx }
 
 // afterFunc gives each registration a pointer identity for stop to find; funcs are not comparable.
 type afterFunc struct{ f func() }
@@ -960,6 +980,7 @@ func (c *mockCtx) cancelTree(err, cause error, stops *[]func() bool) {
 		return
 	}
 	c.err = err
+	c.testEndRef.c = nil
 	c.mock.removeEventLocked(c)
 	c.innerCancel(cause)
 	close(c.done)

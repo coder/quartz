@@ -361,9 +361,6 @@ case <-testCtx.Done():
 }
 ```
 
-Contexts still live when the test ends are canceled with cause `quartz.ErrMockClockTestEnded`, and
-contexts created after the test ended are returned already canceled with that cause.
-
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
 
@@ -374,6 +371,29 @@ parent's deadline, or a time in year 9999 if the parent has none. Libraries such
 `http.Client`, and gRPC compare the deadline with `time.Now()` and would otherwise treat the context
 as already expired. If your code needs the remaining mock time, compute it from the deadline or
 timeout you passed in.
+
+#### At test end
+
+When the test ends, each mock context that is still live is canceled with cause
+`quartz.ErrMockClockTestEnded`. Each context does this in a cleanup it registers on the `t` passed
+to `NewMock` when it is created. Cleanups run last registered first, so a cleanup registered before
+the context, such as a `t.Cleanup(srv.Close)` waiting for a handler blocked on the context, sees it
+canceled, unless the cleanup was already running when the context was created. Cleanups registered
+after the context see it live. A context created after the test ended is returned already canceled
+with the same cause.
+
+`srv.Close` still waits forever in two cases:
+
+- The handler creates the context after `srv.Close` started. With `go 1.24` or later in `go.mod`,
+  derive the context from `t.Context()`, which is canceled before any cleanup runs: create the
+  server with `httptest.NewUnstartedServer`, set `srv.Config.BaseContext` to return `t.Context()`,
+  call `srv.Start()`, and derive the handler's context from `r.Context()`.
+- A subtest uses a `*Mock` created with its parent's `t`. The subtest's cleanups run before the
+  parent's, so the context is still live in them. Create the `*Mock` with the subtest's `t`.
+
+If a cleanup waits for code that reads a mock ticker's or timer's `C`, that code may never receive:
+a ticker stops ticking, and a fired timer drops its unread value, in cleanups that can run before
+yours. Have that code also select on a context that is done by then, such as `t.Context()`.
 
 ## Recommended Patterns
 
