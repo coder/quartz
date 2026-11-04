@@ -763,24 +763,51 @@ func TestWithTimeout_PastDeadline(t *testing.T) {
 	}
 }
 
-// A goroutine that outlives its test can still create mock contexts. The test's cleanups have
-// already run, so the context must be done when it is returned.
-func TestWithTimeout_CreatedAfterTestEnd(t *testing.T) {
+// A context created after the cleanup registered by NewMock has run might never be canceled by a
+// cleanup, so it must be done when it is returned.
+func TestWithTimeout_CreatedAfterMockCleanup(t *testing.T) {
 	t.Parallel()
 
-	var mClock *quartz.Mock
-	// Not parallel, so Inner and its cleanups finish before t.Run returns.
-	t.Run("Inner", func(t *testing.T) {
-		mClock = quartz.NewMock(t)
-	})
-	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
-	defer cancel()
-
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatalf("expected Canceled, got %v", ctx.Err())
+	// Each case creates a context after that cleanup has run and returns the error and cause the
+	// context had when WithTimeout returned. Inner is not parallel, so it and its cleanups finish
+	// before t.Run returns.
+	tests := map[string]func(t *testing.T) (err, cause error){
+		// A goroutine that outlives its test.
+		"AfterTest": func(t *testing.T) (err, cause error) {
+			var mClock *quartz.Mock
+			t.Run("Inner", func(t *testing.T) {
+				mClock = quartz.NewMock(t)
+			})
+			ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+			defer cancel()
+			return ctx.Err(), context.Cause(ctx)
+		},
+		// Cleanups run last added, first called, so this cleanup runs after the one NewMock
+		// registered.
+		"InCleanupRegisteredBeforeNewMock": func(t *testing.T) (err, cause error) {
+			t.Run("Inner", func(t *testing.T) {
+				var mClock *quartz.Mock
+				t.Cleanup(func() {
+					ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+					defer cancel()
+					err, cause = ctx.Err(), context.Cause(ctx)
+				})
+				mClock = quartz.NewMock(t)
+			})
+			return err, cause
+		},
 	}
-	if got := context.Cause(ctx); !errors.Is(got, quartz.ErrMockClockTestEnded) {
-		t.Fatalf("expected cause ErrMockClockTestEnded, got %v", got)
+	for name, createAfterEnd := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err, cause := createAfterEnd(t)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected Canceled, got %v", err)
+			}
+			if !errors.Is(cause, quartz.ErrMockClockTestEnded) {
+				t.Fatalf("expected cause ErrMockClockTestEnded, got %v", cause)
+			}
+		})
 	}
 }
 
