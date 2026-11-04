@@ -849,12 +849,12 @@ func (v *mockCtxView) Deadline() (time.Time, bool) {
 }
 
 // Done, Err, and Value check the parent first because stdlib contexts are done as soon as their
-// parent is, but c may learn of its parent's cancellation from a goroutine. Only the cancellation of
-// the mock context that c registered with reaches c on the canceling goroutine. A cancellation that
-// starts anywhere else, such as at a parent from the context package or at a layer between c and
-// that mock context, reaches c from a goroutine, as does one that happened before c registered.
-// Value is included because context.Cause reads the cause through it. A Done channel obtained
-// before the parent was canceled closes when that goroutine runs.
+// parent is, but c may learn of its parent's cancellation from a goroutine. Only the cancellation
+// of the mock context that c registered with reaches c on the canceling goroutine. A cancellation
+// that starts anywhere else, such as at a parent from the context package or at a layer between c
+// and that mock context, reaches c from a goroutine, as does one that happened before c
+// registered. Value is included because context.Cause reads the cause through it. A Done channel
+// obtained before the parent was canceled closes when that goroutine runs.
 func (v *mockCtxView) Done() <-chan struct{} {
 	v.checkParent()
 	return v.std.Done()

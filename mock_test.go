@@ -340,8 +340,8 @@ func TestTickerFunc_MockContextCanceled(t *testing.T) {
 	}
 }
 
-// A mock context expires when Advance reaches its deadline. By the time MustWait returns, it and the
-// contexts derived from it report DeadlineExceeded and the deadline's cause.
+// A mock context expires when Advance reaches its deadline. By the time MustWait returns, it and
+// the contexts derived from it report DeadlineExceeded and the deadline's cause.
 func TestWithTimeout_FiresOnAdvance(t *testing.T) {
 	t.Parallel()
 
@@ -417,7 +417,9 @@ type embeddingCtx struct{ context.Context }
 // each done before the call that cancels ctx returns. The Mock cases derive a mock context and
 // return a stdlib context derived from it: reading the mock context itself would check its parent
 // and cancel it, hiding a missed notification.
-func descendants(t *testing.T, mClock *quartz.Mock, ctx context.Context) map[string]context.Context {
+func descendants(
+	t *testing.T, mClock *quartz.Mock, ctx context.Context,
+) map[string]context.Context {
 	withCancel := func(parent context.Context) context.Context {
 		child, cancel := context.WithCancel(parent)
 		t.Cleanup(cancel)
@@ -760,13 +762,15 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 func TestWithTimeout_ParentCanceledClosesDone(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]func(t *testing.T, mClock *quartz.Mock) (context.Context, context.CancelFunc){
+	tests := map[string]func(*testing.T, *quartz.Mock) (context.Context, context.CancelFunc){
 		"Stdlib": func(*testing.T, *quartz.Mock) (context.Context, context.CancelFunc) {
 			return context.WithCancel(context.Background())
 		},
 		// The stdlib layer can be canceled without the mock context behind it, so the child must
 		// also register with the layer.
-		"WithCancelOfMock": func(t *testing.T, mClock *quartz.Mock) (context.Context, context.CancelFunc) {
+		"WithCancelOfMock": func(
+			t *testing.T, mClock *quartz.Mock,
+		) (context.Context, context.CancelFunc) {
 			mockParent, cancel := mClock.WithTimeout(context.Background(), time.Hour)
 			t.Cleanup(cancel)
 			return context.WithCancel(mockParent)
@@ -787,7 +791,8 @@ func TestWithTimeout_ParentCanceledClosesDone(t *testing.T) {
 			ctxDone := ctx.Done()
 
 			parentCancel()
-			for name, done := range map[string]<-chan struct{}{"ctx": ctxDone, "child": child.Done()} {
+			dones := map[string]<-chan struct{}{"ctx": ctxDone, "child": child.Done()}
+			for name, done := range dones {
 				select {
 				case <-done:
 				case <-testCtx.Done():

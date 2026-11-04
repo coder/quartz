@@ -49,10 +49,12 @@ type Clock interface {
 	// timeout it passed in, not from ctx.Deadline().
 	//
 	// With a Mock clock, the context and contexts derived from it are done when the cancel function
-	// returns, or when Advance(...).MustWait() returns after the clock reached d. When a parent
-	// from the context package is canceled, Err reports it at once, but contexts derived from the
-	// returned context are canceled a moment later on another goroutine, and a Done channel
-	// obtained before closes only then; wait on Done instead of checking Err.
+	// returns, or when Advance(...).MustWait() returns after the clock reached d. When a
+	// cancellation starts at a parent from the context package, for example through its cancel
+	// function or its deadline, Err reports it at once, but contexts derived from the returned
+	// context are canceled a moment later on another goroutine, and a Done channel obtained
+	// earlier closes only then. Wait on the derived context's Done or on that earlier channel
+	// instead of checking the derived context's Err.
 	WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc)
 
 	// WithDeadlineCause is like WithDeadline and records cause when this Clock reaches d.
