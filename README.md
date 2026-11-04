@@ -447,9 +447,10 @@ blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-depende
   `quartz.NewReal()`. Inside a bubble it runs on bubble time, so you need no `*Mock`, `Advance()`,
   or traps.
 - If the test does real I/O, such as database queries or real network requests, use a `*Mock`
-  outside a bubble, as in [Mocking](#mocking). Bubble time stops while a goroutine waits on I/O, so
-  a timeout does not stop a slow query or request. With `go 1.27` or later in `go.mod`, HTTP tests
-  can stay in the bubble with an `httptest.NewTestServer` created there and its `Client()`.
+  outside a bubble, as in [Mocking](#mocking). While a goroutine waits on I/O, bubble time does not
+  move and `synctest.Wait()` does not return, so a timeout does not stop a slow query or request.
+  With `go 1.27` or later in `go.mod`, HTTP tests can stay in the bubble with an
+  `httptest.NewTestServer` created there and its `Client()`.
 - If you want to decide when time moves, or need traps, use a `*Mock`. It ignores bubble time; only
   `Advance()`, `AdvanceNext()`, and `Set()` move it.
 
@@ -471,10 +472,9 @@ func TestTimeout(t *testing.T) {
 Inside a bubble:
 
 - Do not create an `httptest.NewServer` or leave open a connection that a goroutine reads from, such
-  as an HTTP client's idle keep-alive connection. While a goroutine waits on the network, bubble
-  time does not move and `synctest.Wait()` does not return, so the test hangs at its next
-  `time.Sleep`, timeout, or `synctest.Wait()`, and `synctest.Test` does not return until that
-  goroutine exits.
+  as an HTTP client's idle keep-alive connection. That goroutine waits on the network, which stops
+  bubble time and `synctest.Wait()` as described above, so the test hangs at its next `time.Sleep`,
+  timeout, or `synctest.Wait()`, and `synctest.Test` does not return until that goroutine exits.
 - Create a `*Mock` with the `t` that `synctest.Test` passes in. Cleanup on the outer test's `t` runs
   outside the bubble and can crash the test binary with a fatal error about a
   `synctest channel from outside bubble`.
