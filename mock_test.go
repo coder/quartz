@@ -482,7 +482,11 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 		returned := make(chan struct{})
 		go func() {
 			defer close(returned)
-			mClock.Now()
+			// Callers may reuse a variadic slice once the call returns, so MustRelease must
+			// describe the call before it releases it.
+			tags := []string{"before"}
+			mClock.Now(tags...)
+			tags[0] = "after"
 		}()
 		c, err := trap.Wait(ctx)
 		if err != nil {
@@ -494,7 +498,7 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("the call did not return after MustRelease")
 		}
-		wantMessages(t, tb.messages, "MustRelease of Now([]): context already expired")
+		wantMessages(t, tb.messages, "MustRelease of Now([before]): context already expired")
 	})
 }
 

@@ -737,9 +737,12 @@ func (c *Call) releaseError(err error) error {
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
 func (c *Call) MustRelease(ctx context.Context) {
+	c.tb.Helper()
+	// Describe the call before releasing it: once released, the code under test may return and
+	// reuse the tags slice that the call refers to.
+	call := c.apiCall.String()
 	if err := c.Release(ctx); err != nil {
-		c.tb.Helper()
-		c.tb.Fatalf("MustRelease of %s: %s", c.apiCall, err)
+		c.tb.Fatalf("MustRelease of %s: %s", call, err)
 	}
 }
 
