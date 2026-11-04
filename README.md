@@ -470,6 +470,11 @@ func TestTimeout(t *testing.T) {
 
 Inside a bubble:
 
+- Do not create an `httptest.NewServer` or leave open a connection that a goroutine reads from, such
+  as an HTTP client's idle keep-alive connection. While a goroutine waits on the network, bubble
+  time does not move and `synctest.Wait()` does not return, so the test hangs at its next
+  `time.Sleep`, timeout, or `synctest.Wait()`, and `synctest.Test` does not return until that
+  goroutine exits.
 - Create a `*Mock` with the `t` that `synctest.Test` passes in. Cleanup on the outer test's `t` runs
   outside the bubble and can crash the test binary with a fatal error such as
   `close of synctest channel from outside bubble`.
