@@ -591,47 +591,49 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 }
 
-// TestAdvanceWaiter_ExpiredContext verifies how Wait behaves when the context has already expired:
-// it returns nil if the advance has completed, and returns the context error, without blocking, if
-// the advance has not completed.
+// TestAdvanceWaiter_ExpiredContext verifies that Wait returns the context error, without blocking,
+// when the context has expired, whether or not the advance has completed.
 func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 	t.Parallel()
-	expired, cancel := context.WithCancel(context.Background())
-	cancel()
+	// The deadline passed before Wait, as when the test's timeout ran out first.
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancel)
 
-	t.Run("Completed", func(t *testing.T) {
-		t.Parallel()
-		mClock := quartz.NewMock(t)
+	for _, tt := range []struct {
+		name    string
+		pending bool
+	}{
 		// With no timers or tickers, the advance completes before Advance returns.
-		if err := mClock.Advance(time.Second).Wait(expired); err != nil {
-			t.Fatalf("Wait() = %v, want nil", err)
-		}
-	})
-
-	t.Run("Pending", func(t *testing.T) {
-		t.Parallel()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		mClock := quartz.NewMock(t)
-		release := make(chan struct{})
-		mClock.AfterFunc(time.Second, func() { <-release })
-		w := mClock.Advance(time.Second)
+		{name: "Completed"},
 		// The advance cannot complete until the AfterFunc returns.
-		errs := make(chan error, 1)
-		go func() { errs <- w.Wait(expired) }()
-		select {
-		case err := <-errs:
-			close(release)
-			w.MustWait(ctx)
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+		{name: "Pending", pending: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			mClock := quartz.NewMock(t)
+			release := make(chan struct{})
+			if tt.pending {
+				mClock.AfterFunc(time.Second, func() { <-release })
 			}
-		case <-ctx.Done():
-			close(release)
-			t.Fatal("Wait() did not return after the context expired")
-		}
-	})
+			w := mClock.Advance(time.Second)
+			errs := make(chan error, 1)
+			go func() { errs <- w.Wait(expired) }()
+			select {
+			case err := <-errs:
+				close(release)
+				w.MustWait(ctx)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
+				}
+			case <-ctx.Done():
+				close(release)
+				t.Fatal("Wait() did not return after the context expired")
+			}
+		})
+	}
 }
 
 // TestTrapWait_ExpiredContextNoCall verifies that Wait returns the context error, without blocking,

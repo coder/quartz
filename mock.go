@@ -232,25 +232,22 @@ type AdvanceWaiter struct {
 	ch chan struct{}
 }
 
-// Wait for all timers and ticks to complete, or until context expires.
+// Wait for all timers and ticks to complete, or until context expires. If the context has expired,
+// Wait returns its error even if the timers and ticks have also completed. To check whether they
+// have completed without a deadline, use Done.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-w.ch:
-		return nil
 	case <-ctx.Done():
-		// select picks randomly among ready cases; report completion if it also happened.
-		select {
-		case <-w.ch:
-			return nil
-		default:
-			return ctx.Err()
-		}
 	}
+	// select picks a random ready case. Checking ctx afterwards makes an expired context fail the
+	// same way whether or not the timers and ticks completed first.
+	return ctx.Err()
 }
 
 // MustWait waits for all timers and ticks to complete, and fails the test immediately if the
-// context completes first.  MustWait must be called from the goroutine running the test or
-// benchmark, similar to `t.FailNow()`.
+// context expires, even if they have also completed.  MustWait must be called from the goroutine
+// running the test or benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
 	w.tb.Helper()
 	if err := w.Wait(ctx); err != nil {
