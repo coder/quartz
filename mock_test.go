@@ -339,25 +339,52 @@ func TestTickerFunc_MockContextCanceled(t *testing.T) {
 	}
 }
 
+// A mock context expires when Advance reaches its deadline. By the time MustWait returns, it and the
+// contexts derived from it report DeadlineExceeded and the deadline's cause.
 func TestWithTimeout_FiresOnAdvance(t *testing.T) {
 	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
 
-	mClock := quartz.NewMock(t)
-	ctx, cancel := mClock.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	child, childCancel := context.WithCancel(ctx)
-	defer childCancel()
-
-	mClock.Advance(time.Second).MustWait(testCtx)
-
-	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
+	deadlineCause := errors.New("deadline cause")
+	tests := map[string]struct {
+		newCtx    func(mClock *quartz.Mock) (context.Context, context.CancelFunc)
+		wantCause error
+	}{
+		"WithTimeout": {
+			newCtx: func(mClock *quartz.Mock) (context.Context, context.CancelFunc) {
+				return mClock.WithTimeout(context.Background(), time.Second)
+			},
+			wantCause: context.DeadlineExceeded,
+		},
+		"WithTimeoutCause": {
+			newCtx: func(mClock *quartz.Mock) (context.Context, context.CancelFunc) {
+				return mClock.WithTimeoutCause(context.Background(), time.Second, deadlineCause)
+			},
+			wantCause: deadlineCause,
+		},
 	}
-	// Derived contexts are done by the time MustWait returns.
-	if !errors.Is(child.Err(), context.DeadlineExceeded) {
-		t.Fatalf("expected child DeadlineExceeded, got %v", child.Err())
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+
+			mClock := quartz.NewMock(t)
+			ctx, cancel := tt.newCtx(mClock)
+			defer cancel()
+			ctxs := descendants(t, mClock, ctx)
+			ctxs["Self"] = ctx
+
+			mClock.Advance(time.Second).MustWait(testCtx)
+
+			for name, c := range ctxs {
+				if !errors.Is(c.Err(), context.DeadlineExceeded) {
+					t.Errorf("%s: expected DeadlineExceeded, got %v", name, c.Err())
+				}
+				if !errors.Is(context.Cause(c), tt.wantCause) {
+					t.Errorf("%s: expected cause %v, got %v", name, tt.wantCause, context.Cause(c))
+				}
+			}
+		})
 	}
 }
 
@@ -755,35 +782,6 @@ func TestWithTimeout_ParentDeadlineExceeded(t *testing.T) {
 	}
 	if d, ok := mClock.Peek(); ok {
 		t.Fatalf("expected no pending events, got Peek()=%s", d)
-	}
-}
-
-func TestWithTimeoutCause_Cause(t *testing.T) {
-	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-
-	mClock := quartz.NewMock(t)
-	expectedErr := errors.New("deadline cause")
-	ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, expectedErr)
-	defer cancel()
-	derived := descendants(t, mClock, ctx)
-
-	mClock.Advance(time.Second).MustWait(testCtx)
-
-	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", ctx.Err())
-	}
-	if !errors.Is(context.Cause(ctx), expectedErr) {
-		t.Fatalf("expected cause %v, got %v", expectedErr, context.Cause(ctx))
-	}
-	for name, child := range derived {
-		if !errors.Is(child.Err(), context.DeadlineExceeded) {
-			t.Errorf("%s: expected DeadlineExceeded, got %v", name, child.Err())
-		}
-		if !errors.Is(context.Cause(child), expectedErr) {
-			t.Errorf("%s: expected cause %v, got %v", name, expectedErr, context.Cause(child))
-		}
 	}
 }
 
