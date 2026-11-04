@@ -211,6 +211,7 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 	if len(traps) == 0 {
 		return
 	}
+	c.trapCount = len(traps)
 	c.releases.Add(len(traps))
 	m.mu.Unlock()
 	for _, t := range traps {
@@ -232,26 +233,32 @@ type AdvanceWaiter struct {
 	ch chan struct{}
 }
 
-// Wait for all timers and ticks to complete, or until context expires.
+// Wait for all timers and ticks to complete, or until the context expires.
+// If the context has expired, Wait returns its error even if the advance has completed. To check
+// for completion without a deadline, use Done.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-w.ch:
-		return nil
 	case <-ctx.Done():
-		return ctx.Err()
 	}
+	// select picks a random ready case. Checking ctx afterwards makes an expired context fail the
+	// same way whether or not the advance completed first.
+	return ctx.Err()
 }
 
 // MustWait waits for all timers and ticks to complete, and fails the test immediately if the
-// context completes first.  MustWait must be called from the goroutine running the test or
-// benchmark, similar to `t.FailNow()`.
+// context expires, even if the advance has completed.  MustWait must be called from the goroutine
+// running the test or benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
 	w.tb.Helper()
-	select {
-	case <-w.ch:
+	// A context that had already expired is a mistake in the test, not a slow advance, so it gets
+	// its own message, decided before waiting.
+	if err := ctx.Err(); err != nil {
+		w.tb.Fatalf("context already expired when MustWait was called: %s", err)
 		return
-	case <-ctx.Done():
-		w.tb.Fatalf("context expired while waiting for clock to advance: %s", ctx.Err())
+	}
+	if err := w.Wait(ctx); err != nil {
+		w.tb.Fatalf("context expired while waiting for clock to advance: %s", err)
 	}
 }
 
@@ -642,6 +649,9 @@ type apiCall struct {
 	fn       clockFunction
 	releases sync.WaitGroup
 	complete chan struct{}
+	// trapCount is the number of traps that caught the call. matchCallLocked sets it before it
+	// starts the catch goroutines, and it is read-only after that.
+	trapCount int
 }
 
 func (a *apiCall) String() string {
@@ -686,32 +696,53 @@ type Call struct {
 	trap    *Trap
 }
 
-// Release the call and wait for it to complete. If the provided context expires before the call completes, it returns
-// an error.
+// Release the call and wait for it to complete. If the provided context expires before the call
+// completes, it returns an error. If the context has already expired, Release releases the call
+// and returns the context's error without waiting.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
 func (c *Call) Release(ctx context.Context) error {
+	// Read ctx before releasing: the call cannot complete before this release, so an expired ctx
+	// would otherwise pass only when the code under test returns before the select below. Release
+	// either way, or the code under test stays blocked.
+	expired := ctx.Err()
+	// Count the call as released before letting it return: once releases.Done runs, the code under
+	// test can return and the test can call Trap.Close, which must see the release.
+	c.trap.callReleased()
 	c.apiCall.releases.Done()
+	if expired != nil {
+		return fmt.Errorf("context already expired; this trap released the call: %w", expired)
+	}
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("timed out waiting for release; did more than one trap capture the call?: %w", ctx.Err())
+		return c.releaseError(ctx.Err())
 	case <-c.apiCall.complete:
-		// OK
+		return nil
 	}
-	c.trap.callReleased()
-	return nil
 }
 
-// MustRelease releases the call and waits for it to complete. If the provided context expires before the call
-// completes, it fails the test.
+// releaseError reports a context that expired while Release waited for the call to complete.
+func (c *Call) releaseError(err error) error {
+	if c.apiCall.trapCount > 1 {
+		return fmt.Errorf("timed out waiting for the call to complete; %d traps caught it, "+
+			"and each must release it from its own goroutine: %w", c.apiCall.trapCount, err)
+	}
+	return fmt.Errorf("timed out waiting for the call to complete after release: %w", err)
+}
+
+// MustRelease releases the call and waits for it to complete. It fails the test if the context
+// expires before the call completes or had already expired; the call is released either way.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
 func (c *Call) MustRelease(ctx context.Context) {
+	c.tb.Helper()
+	// Describe the call before releasing it: once released, the code under test may return and
+	// reuse the tags slice that the call refers to.
+	call := c.apiCall.String()
 	if err := c.Release(ctx); err != nil {
-		c.tb.Helper()
-		c.tb.Fatal(err.Error())
+		c.tb.Fatalf("MustRelease of %s: %s", call, err)
 	}
 }
 
@@ -746,7 +777,8 @@ type Trap struct {
 	calls chan *apiCall
 	done  chan struct{}
 
-	// mu protects the unreleasedCalls count
+	// mu protects the unreleasedCalls count. Close takes mu while holding Mock.mu, so do not take
+	// Mock.mu while holding mu.
 	mu              sync.Mutex
 	unreleasedCalls int
 }
@@ -784,9 +816,12 @@ func (t *Trap) Close() {
 		return // already closed
 	default:
 	}
-	if t.unreleasedCalls != 0 {
+	t.mu.Lock()
+	unreleased := t.unreleasedCalls
+	t.mu.Unlock()
+	if unreleased != 0 {
 		t.mock.tb.Helper()
-		t.mock.tb.Errorf("%s Closed() with %d unreleased calls", t, t.unreleasedCalls)
+		t.mock.tb.Errorf("%s Closed() with %d unreleased calls", t, unreleased)
 	}
 	for i, tr := range t.mock.traps {
 		if t == tr {
@@ -804,7 +839,16 @@ func (t *Trap) callReleased() {
 
 var ErrTrapClosed = errors.New("trap closed")
 
+// Wait for a call to be trapped, or until the context expires or the trap is closed. If the
+// context has already expired, Wait returns its error and leaves any trapped call for the next
+// Wait.
 func (t *Trap) Wait(ctx context.Context) (*Call, error) {
+	// select picks a random ready case, so check ctx first to make an expired context fail the same
+	// way whether or not a call is ready or the trap is closed. A call received below must be
+	// returned: the code under test stays blocked until the call is released.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -830,6 +874,12 @@ func (t *Trap) Wait(ctx context.Context) (*Call, error) {
 // test via tb.Fatalf()
 func (t *Trap) MustWait(ctx context.Context) *Call {
 	t.mock.tb.Helper()
+	// As in AdvanceWaiter.MustWait, a context that had already expired is a mistake in the test,
+	// so it gets its own message, decided before waiting.
+	if err := ctx.Err(); err != nil {
+		t.mock.tb.Fatalf("context already expired when MustWait was called for %s: %s", t, err)
+		return nil
+	}
 	c, err := t.Wait(ctx)
 	if err != nil {
 		t.mock.tb.Fatalf("context expired while waiting for %s: %s", t, err.Error())

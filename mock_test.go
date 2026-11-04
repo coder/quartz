@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/quartz"
@@ -372,45 +374,196 @@ func Test_MultipleTraps(t *testing.T) {
 	}
 }
 
-func Test_MultipleTrapsDeadlock(t *testing.T) {
+// TestCallRelease_ExpiredContext verifies that Release returns the context error when the context
+// expires before the call completes, still releases the call so that it returns, and mentions other
+// traps only when they kept the call from completing while Release waited. Close must not report
+// the call, and a failed MustRelease must name MustRelease and the call.
+func TestCallRelease_ExpiredContext(t *testing.T) {
 	t.Parallel()
-	tRunFail(t, func(t testing.TB) {
-		testCtx, testCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer testCancel()
-		mClock := quartz.NewMock(t)
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
 
-		trap0 := mClock.Trap().Now("0")
-		defer trap0.Close()
-		trap1 := mClock.Trap().Now("1")
-		defer trap1.Close()
+	for _, tt := range []struct {
+		name  string
+		traps int
+		// whileWaiting expires the context once Release is blocked waiting for the call to
+		// complete, instead of before Release is called.
+		whileWaiting bool
+		// want must be in the error.
+		want string
+	}{
+		{name: "OneTrap", traps: 1, want: "context already expired; this trap released"},
+		{name: "TwoTraps", traps: 2, want: "context already expired; this trap released"},
+		{name: "OneTrapWhileWaiting", traps: 1, whileWaiting: true, want: "complete after release"},
+		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, want: "2 traps caught it"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				tb := &captureFailTB{TB: t}
+				mClock := quartz.NewMock(tb)
+				// The trapped call is the ticker's Wait, which does not return until the ticker
+				// stops, so the call cannot complete while Release waits, even with one trap.
+				tickerCtx, stopTicker := context.WithCancel(t.Context())
+				defer stopTicker()
+				tkr := mClock.TickerFunc(tickerCtx, time.Hour, func() error { return nil })
+				var tags []string
+				var traps []*quartz.Trap
+				for i := range tt.traps {
+					tags = append(tags, strconv.Itoa(i))
+					traps = append(traps, mClock.Trap().TickerFuncWait(tags[i]))
+				}
+				returned := make(chan struct{})
+				go func() {
+					defer close(returned)
+					_ = tkr.Wait(tags...)
+				}()
 
+				c, err := traps[0].Wait(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				releaseCtx, expire := context.WithCancel(t.Context())
+				defer expire()
+				if !tt.whileWaiting {
+					expire()
+				}
+				errs := make(chan error, 1)
+				go func() { errs <- c.Release(releaseCtx) }()
+				if tt.whileWaiting {
+					synctest.Wait() // Release is blocked waiting for the call to complete.
+					expire()
+				}
+				err = <-errs
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Release() = %v, want %v", err, context.Canceled)
+				}
+				if !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("Release() = %q, want it to contain %q", err, tt.want)
+				}
+				blamesTraps := tt.whileWaiting && tt.traps > 1
+				if strings.Contains(err.Error(), "traps caught it") != blamesTraps {
+					t.Fatalf("Release() = %q, want a mention of other traps: %v", err, blamesTraps)
+				}
+
+				stopTicker()
+				for _, trap := range traps[1:] {
+					c, err := trap.Wait(t.Context())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := c.Release(t.Context()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				<-returned
+				for _, trap := range traps {
+					trap.Close()
+				}
+				if tb.failed {
+					t.Fatal("Close() reported a failure after every trap released the call")
+				}
+			})
+		})
+	}
+
+	t.Run("MustRelease", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
+		trap := mClock.Trap().Now()
+		defer trap.Close()
+		returned := make(chan struct{})
 		go func() {
-			mClock.Now("0", "1")
+			defer close(returned)
+			// Callers may reuse a variadic slice once the call returns, so MustRelease must
+			// describe the call before it releases it. If it does not, -race reports a data race
+			// here, and without -race the message can show "after".
+			tags := []string{"before"}
+			mClock.Now(tags...)
+			tags[0] = "after"
 		}()
-
-		c0 := trap0.MustWait(testCtx)
-		c0.MustRelease(testCtx) // deadlocks, test failure
+		c, err := trap.Wait(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.MustRelease(expired)
+		select {
+		case <-returned:
+		case <-ctx.Done():
+			t.Fatal("the call did not return after MustRelease")
+		}
+		wantMessages(t, tb.messages, "MustRelease of Now([before]): context already expired; this trap")
 	})
 }
 
+// Test_UnreleasedCalls verifies that Close fails the test only when a trapped call has not been
+// released.
 func Test_UnreleasedCalls(t *testing.T) {
 	t.Parallel()
-	tRunFail(t, func(t testing.TB) {
-		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer testCancel()
-		mClock := quartz.NewMock(t)
 
+	t.Run("NotReleased", func(t *testing.T) {
+		t.Parallel()
+		tRunFail(t, func(t testing.TB) {
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+			mClock := quartz.NewMock(t)
+
+			trap := mClock.Trap().Now()
+			defer trap.Close()
+
+			go func() {
+				_ = mClock.Now()
+			}()
+
+			c := trap.MustWait(testCtx) // missing release
+			trap.Close()                // detect unreleased call and fail
+
+			c.Release(testCtx) // clean up goroutine
+		})
+	})
+
+	// Release must count the call as released before the call returns, not after it completes: the
+	// test may call Close as soon as the call returns.
+	t.Run("ReleasedOnAnotherGoroutine", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
 		trap := mClock.Trap().Now()
-		defer trap.Close()
-
+		returned := make(chan struct{})
 		go func() {
-			_ = mClock.Now()
+			defer close(returned)
+			mClock.Now()
 		}()
-
-		c := trap.MustWait(testCtx) // missing release
-		trap.Close()                // detect unreleased call and fail
-
-		c.Release(testCtx) // clean up goroutine
+		c, err := trap.Wait(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		released := make(chan error, 1)
+		go func() { released <- c.Release(ctx) }()
+		select {
+		case <-returned:
+		case <-ctx.Done():
+			t.Fatal("the call did not return after Release")
+		}
+		trap.Close()
+		select {
+		case err := <-released:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal("Release() did not return after the call completed")
+		}
+		if tb.failed {
+			t.Fatal("Close() reported a failure after the released call returned")
+		}
 	})
 }
 
@@ -449,31 +602,38 @@ func Test_WithLogger(t *testing.T) {
 
 type captureFailTB struct {
 	failed bool
+	// messages holds the failure messages, in order.
+	messages []string
 	testing.TB
 }
 
 func (t *captureFailTB) Errorf(format string, args ...any) {
 	t.Helper()
 	t.Logf(format, args...)
-	t.failed = true
+	t.fail(fmt.Sprintf(format, args...))
 }
 
 func (t *captureFailTB) Error(args ...any) {
 	t.Helper()
 	t.Log(args...)
-	t.failed = true
+	t.fail(fmt.Sprint(args...))
 }
 
 func (t *captureFailTB) Fatal(args ...any) {
 	t.Helper()
 	t.Log(args...)
-	t.failed = true
+	t.fail(fmt.Sprint(args...))
 }
 
 func (t *captureFailTB) Fatalf(format string, args ...any) {
 	t.Helper()
 	t.Logf(format, args...)
+	t.fail(fmt.Sprintf(format, args...))
+}
+
+func (t *captureFailTB) fail(msg string) {
 	t.failed = true
+	t.messages = append(t.messages, msg)
 }
 
 func (t *captureFailTB) Fail() {
@@ -493,6 +653,19 @@ func tRunFail(t testing.TB, f func(t testing.TB)) {
 	f(tb)
 	if !tb.Failed() {
 		t.Fatal("want test to fail")
+	}
+}
+
+// wantMessages fails the test unless got has one message per want, each containing its want.
+func wantMessages(t testing.TB, got []string, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("failures = %q, want %d containing %q", got, len(want), want)
+	}
+	for i := range want {
+		if !strings.Contains(got[i], want[i]) {
+			t.Fatalf("failure %d = %q, want it to contain %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -589,6 +762,168 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	case <-tmr.C:
 		// OK
 	}
+}
+
+// TestAdvanceWaiter_ExpiredContext verifies that Wait returns the context error, without blocking,
+// when the context has expired, whether or not the advance has completed. MustWait must say the
+// context had already expired exactly when it had expired before MustWait was called, and
+// otherwise that it expired while waiting.
+func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
+	t.Parallel()
+	// The deadline passed before Wait, as when the test's timeout ran out first.
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancel)
+
+	t.Run("Completed", func(t *testing.T) {
+		t.Parallel()
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
+		// A Wait that picks at random between completion and ctx.Done fails only half the
+		// iterations, so repeat.
+		for range 100 {
+			// With no timers or tickers, the advance completes before Advance returns.
+			err := mClock.Advance(time.Second).Wait(expired)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
+			}
+		}
+
+		mClock.Advance(time.Second).MustWait(expired)
+		wantMessages(t, tb.messages, "already expired when MustWait was called")
+	})
+
+	t.Run("Pending", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			expired, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+			defer cancel()
+			tb := &captureFailTB{TB: t}
+			mClock := quartz.NewMock(tb)
+			release := make(chan struct{})
+			defer close(release)
+			// The advance cannot complete until the AfterFunc returns.
+			mClock.AfterFunc(time.Second, func() { <-release })
+			w := mClock.Advance(time.Second)
+
+			if err := w.Wait(expired); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
+			}
+			w.MustWait(expired)
+
+			ctx, cancelWait := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				w.MustWait(ctx)
+			}()
+			synctest.Wait() // MustWait is blocked waiting for the advance.
+			cancelWait()
+			<-done
+			wantMessages(t, tb.messages, "already expired when MustWait was called",
+				"while waiting for clock to advance")
+		})
+	})
+}
+
+// TestTrapWait_ExpiredContext verifies that Wait returns the context error, without blocking, when
+// the context expires, even if a call is ready or the trap is closed, and that a ready call stays
+// for the next Wait. MustWait must say the context had already expired exactly when it had expired
+// before MustWait was called.
+func TestTrapWait_ExpiredContext(t *testing.T) {
+	t.Parallel()
+
+	t.Run("MustWait", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			tb := &captureFailTB{TB: t}
+			mClock := quartz.NewMock(tb)
+			trap := mClock.Trap().Now()
+			defer trap.Close()
+
+			expired, cancel := context.WithCancel(t.Context())
+			cancel()
+			trap.MustWait(expired)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				trap.MustWait(ctx)
+			}()
+			synctest.Wait() // MustWait is blocked waiting for a call.
+			cancel()
+			<-done
+			wantMessages(t, tb.messages, "context already expired when MustWait was called for Trap Now(",
+				"context expired while waiting for Trap Now(")
+		})
+	})
+
+	t.Run("TrapClosed", func(t *testing.T) {
+		t.Parallel()
+		expired, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		mClock := quartz.NewMock(t)
+		trap := mClock.Trap().Now()
+		trap.Close()
+		// A Wait that picks at random between the closed trap and ctx.Done fails only half the
+		// iterations, so repeat.
+		for range 100 {
+			if _, err := trap.Wait(expired); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+			}
+		}
+	})
+
+	t.Run("CallReady", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			expired, cancel := context.WithCancel(t.Context())
+			cancel()
+			mClock := quartz.NewMock(t)
+			trap := mClock.Trap().Now()
+			defer trap.Close()
+			// A Wait that picks at random between the ready call and ctx.Done fails only half the
+			// iterations, so repeat.
+			for range 100 {
+				go mClock.Now()
+				synctest.Wait() // The trap is blocked handing over the call.
+				c, err := trap.Wait(expired)
+				if err == nil {
+					c.MustRelease(t.Context())
+					t.Fatal("Wait() returned the ready call, want the context error")
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+				}
+				c, err = trap.Wait(t.Context())
+				if err != nil {
+					t.Fatalf("second Wait() = %v, want the ready call", err)
+				}
+				c.MustRelease(t.Context())
+			}
+		})
+	})
+
+	t.Run("ExpiresWhileWaiting", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			mClock := quartz.NewMock(t)
+			trap := mClock.Trap().Now()
+			defer trap.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			errs := make(chan error, 1)
+			go func() {
+				_, err := trap.Wait(ctx)
+				errs <- err
+			}()
+			synctest.Wait() // Wait is blocked waiting for a call.
+			cancel()
+			if err := <-errs; !errors.Is(err, context.Canceled) {
+				t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+			}
+		})
+	})
 }
 
 func TestNoLeak_Go123(t *testing.T) {
