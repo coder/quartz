@@ -651,65 +651,87 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 }
 
-// TestTimer_ReadableDuringCleanup checks that a cleanup registered after NewMock, which runs before
-// NewMock's cleanup, can still receive from a timer that fired during the test. Tests that stop a
-// server in such a cleanup rely on this when a worker reads the timer on its way out.
-func TestTimer_ReadableDuringCleanup(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+// newTimer and newTicker create a timer or ticker that fires after one second and return its
+// channel.
+func newTimer(m *quartz.Mock) <-chan time.Time  { return m.NewTimer(time.Second).C }
+func newTicker(m *quartz.Mock) <-chan time.Time { return m.NewTicker(time.Second).C }
 
-		mClock := quartz.NewMock(t)
-		busy := make(chan struct{})
-		quit := make(chan struct{})
-		exited := make(chan struct{})
-		// Stands in for a server's Close: it unblocks the worker and waits for it to exit. Bubble
-		// time moves once every goroutine is blocked, so a worker that never receives fails the
-		// test at once. quit then lets the worker exit, so the bubble can end.
-		t.Cleanup(func() {
-			close(busy)
-			select {
-			case <-exited:
-			case <-time.After(10 * time.Second):
-				t.Error("worker did not receive the timer value during cleanup")
-			}
-			close(quit)
-		})
-		tmr := mClock.NewTimer(time.Second)
-		go func() {
-			defer close(exited)
-			<-busy
-			select {
-			case <-tmr.C:
-			case <-quit:
-			}
-		}()
-		mClock.Advance(time.Second).MustWait(ctx)
-	})
-}
-
-// TestTimer_ReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup
-// runs receives the value of a timer that fires just before or after that cleanup. synctest.Wait
-// makes sure the reader is waiting before the timer fires and that the send has ended before the
-// check.
-func TestTimer_ReaderWaitingAtMockCleanup(t *testing.T) {
+// TestReadableDuringCleanup checks that a cleanup registered after NewMock, which runs before
+// NewMock's cleanup, can still receive from a timer or ticker that fired during the test. Tests
+// that stop a server in such a cleanup rely on this when a worker reads the channel on its way out.
+func TestReadableDuringCleanup(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name             string
-		fireAfterCleanup bool
+		name  string
+		start func(*quartz.Mock) <-chan time.Time
 	}{
-		// The test fires the timer as its last step. In a bubble, the goroutine that sends the
-		// value often starts only after NewMock's cleanup is waiting to end it.
-		{name: "FiredBeforeCleanup"},
-		{name: "FiredAfterCleanup", fireAfterCleanup: true},
+		{name: "Timer", start: newTimer},
+		{name: "Ticker", start: newTicker},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			// When the sending goroutine starts late, select picks at random between the reader
-			// and the cleanup, so a send that does not try the reader first loses the value about
-			// half the time. Each round is a new bubble, so without the race detector, which
-			// changes scheduling, the test then fails in nearly every run.
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				mClock := quartz.NewMock(t)
+				busy := make(chan struct{})
+				quit := make(chan struct{})
+				exited := make(chan struct{})
+				// Stands in for a server's Close: it unblocks the worker and waits for it to exit.
+				// It is registered before the timer or ticker is created, as when the server
+				// creates them. Bubble time moves once every goroutine is blocked, so a worker that
+				// never receives fails the test at once. quit then lets the worker exit, so the
+				// bubble can end.
+				t.Cleanup(func() {
+					close(busy)
+					select {
+					case <-exited:
+					case <-time.After(10 * time.Second):
+						t.Error("worker did not receive from the channel during cleanup")
+					}
+					close(quit)
+				})
+				c := tc.start(mClock)
+				go func() {
+					defer close(exited)
+					<-busy
+					select {
+					case <-c:
+					case <-quit:
+					}
+				}()
+				mClock.Advance(time.Second).MustWait(ctx)
+			})
+		})
+	}
+}
+
+// TestReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup runs
+// receives a timer value or tick sent just before or after that cleanup. synctest.Wait makes sure
+// the reader is waiting before the clock fires and that the send has ended before the check.
+func TestReaderWaitingAtMockCleanup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		start            func(*quartz.Mock) <-chan time.Time
+		fireAfterCleanup bool
+	}{
+		// These two fire as the test's last step. In a bubble, the goroutine that sends on C often
+		// reaches its send only after NewMock's cleanup is waiting to end it.
+		{name: "TimerFiredBeforeCleanup", start: newTimer},
+		{name: "TickerFiredBeforeCleanup", start: newTicker},
+		// These two fire from the cleanup registered before NewMock, which runs after NewMock's.
+		{name: "TimerFiredAfterCleanup", start: newTimer, fireAfterCleanup: true},
+		{name: "TickerFiredAfterCleanup", start: newTicker, fireAfterCleanup: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// A send that reaches its select after NewMock's cleanup is waiting to end it finds the
+			// reader and the cleanup both ready, and select picks between them at random. A send
+			// that does not try the reader first then loses the value about half the time. Each
+			// round is a new bubble, so without the race detector, which changes scheduling, the
+			// test then fails in nearly every run.
 			for range 10 {
 				synctest.Test(t, func(t *testing.T) {
 					var mClock *quartz.Mock
@@ -723,14 +745,14 @@ func TestTimer_ReaderWaitingAtMockCleanup(t *testing.T) {
 						synctest.Wait()
 						close(quit)
 						if len(received) == 0 {
-							t.Error("the waiting reader did not receive the timer value")
+							t.Error("the waiting reader did not receive the value")
 						}
 					})
 					mClock = quartz.NewMock(t)
-					tmr := mClock.NewTimer(time.Second)
+					c := tc.start(mClock)
 					go func() {
 						select {
-						case <-tmr.C:
+						case <-c:
 							received <- struct{}{}
 						case <-quit:
 						}
@@ -772,39 +794,144 @@ func TestNoLeak_Go123(t *testing.T) {
 		}
 	})
 
-	// A test that stops waiting on an Advance can end before its timers fire.
-	t.Run("TimerFiredAfterTestEnds", func(t *testing.T) {
+	// Code that outlives a test, or an Advance it stopped waiting on, can use the Mock afterward.
+	t.Run("AfterTestEnds", func(t *testing.T) {
 		t.Parallel()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		for _, tc := range []struct {
+			name   string
+			during func(*quartz.Mock) (after func())
+		}{
+			{
+				name: "TimerFired",
+				during: func(m *quartz.Mock) func() {
+					_ = m.NewTimer(time.Second)
+					return func() {}
+				},
+			},
+			{
+				name: "TickerResetAfterStop",
+				during: func(m *quartz.Mock) func() {
+					tkr := m.NewTicker(time.Second)
+					tkr.Stop()
+					return func() { tkr.Reset(time.Second) }
+				},
+			},
+			{
+				name: "NewTicker",
+				during: func(m *quartz.Mock) func() {
+					return func() { _ = m.NewTicker(time.Second) }
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-		var mClock *quartz.Mock
-		t.Run("Inner", func(t *testing.T) {
-			mClock = quartz.NewMock(t)
-			_ = mClock.NewTimer(time.Second)
-		})
-		if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
-			t.Fatal(err)
+				var mClock *quartz.Mock
+				var after func()
+				t.Run("Inner", func(t *testing.T) {
+					mClock = quartz.NewMock(t)
+					after = tc.during(mClock)
+				})
+				after()
+				if err := mClock.Advance(time.Second).Wait(ctx); err != nil {
+					t.Fatal(err)
+				}
+			})
 		}
 	})
 }
 
-func TestTickerStop_Go123(t *testing.T) {
+// TestTicker_ResetInBubble resets a running ticker from a synctest bubble that did not create its
+// Mock. Reset must start no goroutine there: one waiting on the Mock's channels, which belong to no
+// bubble, keeps synctest.Test from returning, and go test -timeout then stops the run with this
+// test's synctest.Test call in the stack.
+func TestTicker_ResetInBubble(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	mClock := quartz.NewMock(t)
-
-	tkr := mClock.NewTicker(1 * time.Second)
-	mClock.Advance(1 * time.Second).MustWait(ctx)
-	tkr.Stop()
-
+	tkr := mClock.NewTicker(time.Second)
+	synctest.Test(t, func(*testing.T) { tkr.Reset(time.Hour) })
+	mClock.Advance(time.Hour).MustWait(ctx)
 	select {
-	case tme := <-tkr.C:
-		t.Fatalf("got channel read after stop: %s", tme)
-	default:
-		// OK!
+	case <-tkr.C:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the tick after Reset")
+	}
+}
+
+// TestTicker_StopAndReset checks that no tick is received after Stop or Reset returns, and that
+// Reset's period applies, as with a time.Ticker.
+func TestTicker_StopAndReset(t *testing.T) {
+	t.Parallel()
+	ticked := func(ctx context.Context, m *quartz.Mock) *quartz.Ticker {
+		tkr := m.NewTicker(time.Second)
+		m.Advance(time.Second).MustWait(ctx)
+		return tkr
+	}
+	// Advance fires the ticker from a new goroutine, which can run before or after the call.
+	advancing := func(_ context.Context, m *quartz.Mock) *quartz.Ticker {
+		tkr := m.NewTicker(time.Second)
+		_ = m.Advance(time.Second)
+		return tkr
+	}
+	stop := func(tkr *quartz.Ticker) { tkr.Stop() }
+	reset := func(tkr *quartz.Ticker) { tkr.Reset(time.Hour) }
+	for _, tc := range []struct {
+		name  string
+		start func(context.Context, *quartz.Mock) *quartz.Ticker
+		call  func(*quartz.Ticker)
+		// wantNext is how long after the call the ticker ticks, or 0 if it does not.
+		wantNext time.Duration
+	}{
+		{name: "StopTickedUnread", start: ticked, call: stop},
+		{name: "ResetTickedUnread", start: ticked, call: reset, wantNext: time.Hour},
+		{name: "StopDuringAdvance", start: advancing, call: stop},
+		{name: "ResetDuringAdvance", start: advancing, call: reset, wantNext: time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				mClock := quartz.NewMock(t)
+				tkr := tc.start(ctx, mClock)
+				tc.call(tkr)
+				// Lets any goroutine that could still send on C run before the checks.
+				synctest.Wait()
+				select {
+				case tme := <-tkr.C:
+					t.Errorf("received %s after the call returned", tme)
+				default:
+				}
+				if next, _ := mClock.Peek(); next != tc.wantNext {
+					t.Errorf("ticker ticks in %s, want %s", next, tc.wantNext)
+				}
+			})
+		})
+	}
+}
+
+// TestTickerReset_NonPositiveDuration checks that Reset panics for a duration that is not positive,
+// as time.Ticker.Reset and NewTicker do. A mock ticker with such a period made the next fire loop
+// forever with the Mock's lock held.
+func TestTickerReset_NonPositiveDuration(t *testing.T) {
+	t.Parallel()
+	for _, d := range []time.Duration{0, -time.Second} {
+		t.Run(d.String(), func(t *testing.T) {
+			t.Parallel()
+			tkr := quartz.NewMock(t).NewTicker(time.Second)
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Reset(%s) did not panic", d)
+				}
+			}()
+			tkr.Reset(d)
+		})
 	}
 }
 
