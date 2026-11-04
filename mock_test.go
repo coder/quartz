@@ -546,6 +546,66 @@ func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 	}
 }
 
+// When cancel is called while an expiry is canceling the mock contexts created from the context,
+// cancel returns after they and their descendants are done.
+func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
+	t.Parallel()
+
+	// Each case derives contexts from ctx and returns them, a channel that closes while the expiry
+	// is still running, and a function that lets the expiry finish.
+	tests := map[string]func(t *testing.T, mClock *quartz.Mock, ctx context.Context) (
+		derived []context.Context, expiring <-chan struct{}, release func()){
+		// ctx.Done closes before the expiry cancels the mock contexts, and with many of them the
+		// expiry is still canceling when cancel is called.
+		"ManyMockContexts": func(t *testing.T, mClock *quartz.Mock, ctx context.Context) (
+			[]context.Context, <-chan struct{}, func(),
+		) {
+			var derived []context.Context
+			for range 200 {
+				nested, cancel := mClock.WithTimeout(ctx, time.Hour)
+				t.Cleanup(cancel)
+				child, childCancel := context.WithCancel(nested)
+				t.Cleanup(childCancel)
+				derived = append(derived, child)
+			}
+			return derived, ctx.Done(), func() {}
+		},
+	}
+	for name, derive := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+
+			mClock := quartz.NewMock(t)
+			deadlineCause := errors.New("deadline cause")
+			ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, deadlineCause)
+			derived, expiring, release := derive(t, mClock, ctx)
+
+			w := mClock.Advance(time.Second)
+			select {
+			case <-expiring:
+			case <-testCtx.Done():
+				t.Fatal("timed out waiting for the expiry")
+			}
+			cancel()
+			var live int
+			for _, c := range derived {
+				err, cause := c.Err(), context.Cause(c)
+				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(cause, deadlineCause) {
+					live++
+				}
+			}
+			release()
+			w.MustWait(testCtx)
+			if live > 0 {
+				t.Fatalf("%d of %d derived contexts lacked DeadlineExceeded or the deadline cause "+
+					"when cancel returned", live, len(derived))
+			}
+		})
+	}
+}
+
 func TestWithDeadline_Deadline(t *testing.T) {
 	t.Parallel()
 
