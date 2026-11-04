@@ -373,7 +373,8 @@ func Test_MultipleTraps(t *testing.T) {
 }
 
 // Test_MultipleTrapsDeadlock verifies that Release fails while another trap still holds the call,
-// and that the call still counts as released, so Close does not report it.
+// with an error that names the number of traps, and that the call still counts as released, so
+// Close does not report it.
 func Test_MultipleTrapsDeadlock(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -395,8 +396,9 @@ func Test_MultipleTrapsDeadlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The call cannot complete until trap1 releases it too.
-	if err := c0.Release(expired); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Release() = %v, want %v", err, context.Canceled)
+	err = c0.Release(expired)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "2 traps") {
+		t.Fatalf("Release() = %v, want %v naming 2 traps", err, context.Canceled)
 	}
 	c1, err := trap1.Wait(ctx)
 	if err != nil {

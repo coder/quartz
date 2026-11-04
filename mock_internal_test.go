@@ -3,13 +3,14 @@ package quartz
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
 
-// The public API cannot make a trapped call ready, or complete, before Trap.Wait or Call.Release
-// observes the context: catch delivers each call from its own goroutine, and a call completes only
-// after its last release. These tests build that state directly.
+// The public API cannot control when a trapped call becomes ready, or when a released call
+// completes: catch delivers each call from its own goroutine, and a released call completes on the
+// goroutine of the code under test. These tests build those states directly.
 
 // TestTrapWait_CallReadyWithExpiredContext verifies that Wait returns the context error when the
 // context has expired, even if a call is ready, and leaves the call for the next Wait.
@@ -42,19 +43,46 @@ func TestTrapWait_CallReadyWithExpiredContext(t *testing.T) {
 	}
 }
 
-func TestCallRelease_CompletedWithExpiredContext(t *testing.T) {
+// TestCallRelease_ExpiredContext verifies that Release returns nil when the context has expired but
+// the call has completed, and otherwise returns the context error. With one trap, the error does
+// not suggest that other traps hold the call.
+func TestCallRelease_ExpiredContext(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	expired, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	a := newCall(clockFunctionNow, nil)
-	a.releases.Add(1)
-	// Closing complete first stands in for the trapped call returning after Release calls
-	// releases.Done and before Release checks the context.
-	close(a.complete)
-	c := &Call{tb: t, apiCall: a, trap: &Trap{unreleasedCalls: 1}}
+	for _, tt := range []struct {
+		name      string
+		completed bool
+	}{
+		// Closing complete first stands in for the trapped call returning after Release calls
+		// releases.Done and before Release checks the context.
+		{name: "Completed", completed: true},
+		{name: "NotCompleted"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			a := newCall(clockFunctionNow, nil)
+			a.traps = 1
+			a.releases.Add(1)
+			if tt.completed {
+				close(a.complete)
+			}
+			c := &Call{tb: t, apiCall: a, trap: &Trap{unreleasedCalls: 1}}
 
-	if err := c.Release(ctx); err != nil {
-		t.Fatalf("Release() = %v, want nil", err)
+			err := c.Release(expired)
+			if tt.completed {
+				if err != nil {
+					t.Fatalf("Release() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Release() = %v, want %v", err, context.Canceled)
+			}
+			if strings.Contains(err.Error(), "trap") {
+				t.Fatalf("Release() = %q, want no mention of other traps", err)
+			}
+		})
 	}
 }

@@ -211,6 +211,7 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 	if len(traps) == 0 {
 		return
 	}
+	c.traps = len(traps)
 	c.releases.Add(len(traps))
 	m.mu.Unlock()
 	for _, t := range traps {
@@ -642,6 +643,8 @@ type apiCall struct {
 	fn       clockFunction
 	releases sync.WaitGroup
 	complete chan struct{}
+	// traps is the number of traps that caught the call.
+	traps int
 }
 
 func (a *apiCall) String() string {
@@ -700,13 +703,17 @@ func (c *Call) Release(ctx context.Context) error {
 		// select picks randomly among ready cases; report completion if it also happened.
 		select {
 		case <-c.apiCall.complete:
+			return nil
 		default:
-			return fmt.Errorf("timed out waiting for release; did more than one trap capture the call?: %w", ctx.Err())
 		}
+		if c.apiCall.traps > 1 {
+			return fmt.Errorf("timed out waiting for the call to complete; %d traps caught it and each "+
+				"must release it: %w", c.apiCall.traps, ctx.Err())
+		}
+		return fmt.Errorf("timed out waiting for the call to complete after release: %w", ctx.Err())
 	case <-c.apiCall.complete:
-		// OK
+		return nil
 	}
-	return nil
 }
 
 // MustRelease releases the call and waits for it to complete. If the provided context expires before the call
