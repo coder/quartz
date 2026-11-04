@@ -369,8 +369,8 @@ contexts created after the test ended are returned already canceled with that ca
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
 
-A pending mock context also limits how far `Advance()` can move the clock; see
-[Advance only to the next event](#advance-only-to-the-next-event).
+A pending mock context also limits how far `Advance()` can move the clock; see [Advance only to the
+next event](#advance-only-to-the-next-event).
 
 #### `Deadline()` does not report mock time
 

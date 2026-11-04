@@ -475,8 +475,8 @@ func (m *Mock) advanceLocked(w AdvanceWaiter) {
 }
 
 // Set the time to t.  If the time is after the current mocked time, then this is equivalent to
-// Advance() with the difference.  You may only Set the time earlier than the current time while
-// no events are scheduled (e.g. at the start of your test case).
+// Advance() with the difference.  You may only Set the time earlier than the current time while no
+// events are scheduled (e.g. at the start of your test case).
 func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
@@ -540,8 +540,8 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 	return d, w
 }
 
-// Peek returns the duration until the next scheduled event and the value true, or, if there are
-// no scheduled events, it returns zero and false.
+// Peek returns the duration until the next scheduled event and the value true, or, if there are no
+// scheduled events, it returns zero and false.
 func (m *Mock) Peek() (d time.Duration, ok bool) {
 	m.checkDoneContexts()
 	m.mu.Lock()
@@ -656,9 +656,8 @@ func (m *Mock) WithLogger(l Logger) *Mock {
 	return m
 }
 
-// NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
-// You may re-set the time earlier than this, but only before any events are
-// scheduled.
+// NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024. You may re-set the
+// time earlier than this, but only before any events are scheduled.
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {

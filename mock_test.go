@@ -1582,9 +1582,8 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 		t.Fatal("Reset should report the timer was active")
 	}
 
-	// The timer's old 1h schedule must not remain in the mock's event list.
-	// If it does, Advance rejects with "cannot advance 2h0m0s which is beyond
-	// next event".
+	// The timer's old 1h schedule must not remain in the mock's event list. If it does, Advance
+	// rejects with "cannot advance 2h0m0s which is beyond next event".
 	if d, ok := mClock.Peek(); ok {
 		t.Fatalf("expected no pending events, got Peek()=%s", d)
 	}
