@@ -651,42 +651,57 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 	}
 }
 
-// TestTimer_ReadableDuringCleanup checks that a cleanup registered after NewMock, which runs before
-// NewMock's cleanup, can still receive from a timer that fired during the test. Tests that stop a
-// server in such a cleanup rely on this when a worker reads the timer on its way out.
-func TestTimer_ReadableDuringCleanup(t *testing.T) {
+// TestReadableDuringCleanup checks that a cleanup registered after NewMock, which runs before
+// NewMock's cleanup, can still receive from a timer or ticker that fired during the test. Tests
+// that stop a server in such a cleanup rely on this when a worker reads the channel on its way out.
+func TestReadableDuringCleanup(t *testing.T) {
 	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	newTimer := func(m *quartz.Mock) <-chan time.Time { return m.NewTimer(time.Second).C }
+	newTicker := func(m *quartz.Mock) <-chan time.Time { return m.NewTicker(time.Second).C }
+	for _, tc := range []struct {
+		name  string
+		start func(*quartz.Mock) <-chan time.Time
+	}{
+		{name: "Timer", start: newTimer},
+		{name: "Ticker", start: newTicker},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-		mClock := quartz.NewMock(t)
-		busy := make(chan struct{})
-		quit := make(chan struct{})
-		exited := make(chan struct{})
-		// Stands in for a server's Close: it unblocks the worker and waits for it to exit. Bubble
-		// time moves once every goroutine is blocked, so a worker that never receives fails the
-		// test at once. quit then lets the worker exit, so the bubble can end.
-		t.Cleanup(func() {
-			close(busy)
-			select {
-			case <-exited:
-			case <-time.After(10 * time.Second):
-				t.Error("worker did not receive the timer value during cleanup")
-			}
-			close(quit)
+				mClock := quartz.NewMock(t)
+				busy := make(chan struct{})
+				quit := make(chan struct{})
+				exited := make(chan struct{})
+				// Stands in for a server's Close: it unblocks the worker and waits for it to exit. It
+				// is registered before the timer or ticker is created, as when the server creates
+				// them. Bubble time moves once every goroutine is blocked, so a worker that never
+				// receives fails the test at once. quit then lets the worker exit, so the bubble can
+				// end.
+				t.Cleanup(func() {
+					close(busy)
+					select {
+					case <-exited:
+					case <-time.After(10 * time.Second):
+						t.Error("worker did not receive from the channel during cleanup")
+					}
+					close(quit)
+				})
+				c := tc.start(mClock)
+				go func() {
+					defer close(exited)
+					<-busy
+					select {
+					case <-c:
+					case <-quit:
+					}
+				}()
+				mClock.Advance(time.Second).MustWait(ctx)
+			})
 		})
-		tmr := mClock.NewTimer(time.Second)
-		go func() {
-			defer close(exited)
-			<-busy
-			select {
-			case <-tmr.C:
-			case <-quit:
-			}
-		}()
-		mClock.Advance(time.Second).MustWait(ctx)
-	})
+	}
 }
 
 // TestReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup runs
