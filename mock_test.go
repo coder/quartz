@@ -407,6 +407,27 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 	}
 }
 
+// Canceling a chain of mock contexts reads each context's parent a bounded number of times. If the
+// reads grow exponentially with the chain's depth, cancel hangs, and go test -timeout reports it by
+// naming this test.
+func TestWithTimeout_CancelDeepMockChain(t *testing.T) {
+	t.Parallel()
+
+	mClock := quartz.NewMock(t)
+	root, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+	ctx := root
+	for range 30 {
+		nested, nestedCancel := mClock.WithTimeout(ctx, time.Hour)
+		t.Cleanup(nestedCancel)
+		ctx = nested
+	}
+
+	cancel()
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Errorf("expected the deepest context Canceled, got %v", ctx.Err())
+	}
+}
+
 type ctxKey struct{}
 
 // embeddingCtx is a user-defined context that embeds its parent, as wrappers in logging and tracing
@@ -416,9 +437,7 @@ type embeddingCtx struct{ context.Context }
 // descendants returns contexts derived from ctx directly and through layers that do not cancel,
 // each done before the call that cancels ctx returns. The Mock cases derive a mock context and
 // return a stdlib context derived from it: reading the mock context itself would check its parent
-// and cancel it, hiding a missed notification. If reads of a canceled chain of mock contexts cost
-// time exponential in its depth again, canceling ctx hangs on DeepMockChain, and go test -timeout
-// reports it by naming the test.
+// and cancel it, hiding a missed notification.
 func descendants(
 	t *testing.T, mClock *quartz.Mock, ctx context.Context,
 ) map[string]context.Context {
@@ -427,23 +446,19 @@ func descendants(
 		t.Cleanup(cancel)
 		return child
 	}
-	throughMocks := func(parent context.Context, depth int) context.Context {
-		for range depth {
-			nested, cancel := mClock.WithTimeout(parent, time.Hour)
-			t.Cleanup(cancel)
-			parent = nested
-		}
-		return withCancel(parent)
+	throughMock := func(parent context.Context) context.Context {
+		nested, cancel := mClock.WithTimeout(parent, time.Hour)
+		t.Cleanup(cancel)
+		return withCancel(nested)
 	}
 	return map[string]context.Context{
 		"Direct":               withCancel(ctx),
 		"WithValue":            withCancel(context.WithValue(ctx, ctxKey{}, "v")),
 		"Embedding":            withCancel(embeddingCtx{ctx}),
-		"Mock":                 throughMocks(ctx, 1),
-		"MockWithValue":        throughMocks(context.WithValue(ctx, ctxKey{}, "v"), 1),
-		"MockEmbedding":        throughMocks(embeddingCtx{ctx}, 1),
-		"MockBehindWithCancel": throughMocks(withCancel(ctx), 1),
-		"DeepMockChain":        throughMocks(ctx, 30),
+		"Mock":                 throughMock(ctx),
+		"MockWithValue":        throughMock(context.WithValue(ctx, ctxKey{}, "v")),
+		"MockEmbedding":        throughMock(embeddingCtx{ctx}),
+		"MockBehindWithCancel": throughMock(withCancel(ctx)),
 	}
 }
 
