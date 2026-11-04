@@ -439,8 +439,8 @@ existing unit tests.
 
 ## Quartz and `testing/synctest`
 
-Since Go 1.25, [`synctest.Test`](https://pkg.go.dev/testing/synctest) runs a test in a "bubble"
-whose fake clock moves forward when every goroutine in the bubble is [durably
+With `go 1.25` or later in `go.mod`, [`synctest.Test`](https://pkg.go.dev/testing/synctest) runs a
+test in a "bubble" whose fake clock moves forward when every goroutine in the bubble is [durably
 blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-dependent code:
 
 - If the test does no real I/O, run it in `synctest.Test` and keep the production
@@ -451,8 +451,8 @@ blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-depende
   move and `synctest.Wait()` does not return, so a timeout does not stop a slow query or request.
   With `go 1.27` or later in `go.mod`, HTTP tests can stay in the bubble with an
   `httptest.NewTestServer` created there and its `Client()`.
-- If you want to decide when time moves, or need traps, use a `*Mock`. It ignores bubble time; only
-  `Advance()`, `AdvanceNext()`, and `Set()` move it.
+- If you want to decide when time moves, or need traps, use a `*Mock`, inside or outside a bubble.
+  It ignores bubble time; only `Advance()`, `AdvanceNext()`, and `Set()` move it.
 
 ```go
 func TestTimeout(t *testing.T) {
