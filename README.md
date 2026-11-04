@@ -478,9 +478,12 @@ Inside a bubble:
 - Create a `*Mock` with the `t` that `synctest.Test` passes in. Cleanup on the outer test's `t` runs
   outside the bubble and can crash the test binary with a fatal error about a
   `synctest channel from outside bubble`.
-- With a `*Mock`, `synctest.Wait()` replaces traps that only wait for code to reach a clock call. It
-  returns once every other goroutine in the bubble is durably blocked, for example on the timer it
-  just created, so a following `Advance()` fires that timer.
+- With a `*Mock`, `synctest.Wait()` can replace a trap that only waits for the code to reach a clock
+  call, if the code makes that call before it first durably blocks. `synctest.Wait()` returns once
+  every other goroutine in the bubble is durably blocked or has exited. If a goroutine is then
+  blocked on the timer that goroutine just created, a following `Advance()` fires that timer; if it
+  is blocked in `time.Sleep` or on a channel before the call, the timer does not exist yet. In that
+  case, keep the trap.
 - Test timeouts created in a bubble, such as the `ctx` you pass to `MustWait`, run on bubble time.
   Make them longer than the bubble time that passes while they are in use: a 10-second `ctx` expires
   during a `time.Sleep(time.Minute)`. A long timeout costs no wall time: when every goroutine in the
