@@ -34,10 +34,9 @@ type Timer struct {
 
 func (t *Timer) fire(tt time.Time) {
 	t.mock.mu.Lock()
-	// A fire that gets the lock after Stop or Reset belongs to the schedule they replaced: Stop
-	// stops the timer, and Reset moves nxt. Both happen when NewTimer or Reset fires a
-	// non-positive duration from a new goroutine, and when Stop or Reset gets the lock before a
-	// fire that Advance started.
+	// Drop a fire whose schedule is gone: the timer was stopped, has already fired, or Reset
+	// moved nxt. Fires for a non-positive duration and fires from Advance run on new goroutines,
+	// so Stop, Reset or an earlier fire can take the lock first.
 	if t.stopped || !t.nxt.Equal(tt) {
 		t.mock.mu.Unlock()
 		return
