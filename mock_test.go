@@ -773,7 +773,9 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 }
 
 // TestAdvanceWaiter_ExpiredContext verifies that Wait returns the context error, without blocking,
-// when the context has expired, whether or not the advance has completed.
+// when the context has expired, whether or not the advance has completed. MustWait must say the
+// context had already expired exactly when it had expired before MustWait was called, and
+// otherwise that it expired while waiting.
 func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 	t.Parallel()
 	// The deadline passed before Wait, as when the test's timeout ran out first.
