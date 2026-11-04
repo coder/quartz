@@ -385,15 +385,16 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		traps int
-		// whileWaiting gives Release a context that expires once Release waits for the other
-		// traps, instead of one that has already expired.
+		// whileWaiting gives Release a context that expires once Release waits for the call to
+		// complete, instead of one that has already expired.
 		whileWaiting bool
 		// want must be in the error.
 		want string
 	}{
 		{name: "OneTrap", traps: 1, want: "already expired when Release was called; this trap released"},
 		{name: "TwoTraps", traps: 2, want: "already expired when Release was called; this trap released"},
-		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, want: "2 traps"},
+		{name: "OneTrapWhileWaiting", traps: 1, whileWaiting: true, want: "complete after release"},
+		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, want: "2 traps caught it"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -402,16 +403,21 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 
 			tb := &captureFailTB{TB: t}
 			mClock := quartz.NewMock(tb)
+			// The trapped call is the ticker's Wait, which does not return until the ticker stops,
+			// so the call cannot complete while Release waits, even with one trap.
+			tickerCtx, stopTicker := context.WithCancel(ctx)
+			defer stopTicker()
+			tkr := mClock.TickerFunc(tickerCtx, time.Hour, func() error { return nil })
 			var tags []string
 			var traps []*quartz.Trap
 			for i := range tt.traps {
 				tags = append(tags, strconv.Itoa(i))
-				traps = append(traps, mClock.Trap().Now(tags[i]))
+				traps = append(traps, mClock.Trap().TickerFuncWait(tags[i]))
 			}
 			returned := make(chan struct{})
 			go func() {
 				defer close(returned)
-				mClock.Now(tags...)
+				_ = tkr.Wait(tags...)
 			}()
 
 			c, err := traps[0].Wait(ctx)
@@ -435,10 +441,12 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Release() = %q, want it to contain %q", err, tt.want)
 			}
-			if !tt.whileWaiting && strings.Contains(err.Error(), "traps caught it") {
-				t.Fatalf("Release() = %q, want no mention of other traps", err)
+			blamesTraps := tt.whileWaiting && tt.traps > 1
+			if strings.Contains(err.Error(), "traps caught it") != blamesTraps {
+				t.Fatalf("Release() = %q, want a mention of other traps: %v", err, blamesTraps)
 			}
 
+			stopTicker()
 			for _, trap := range traps[1:] {
 				c, err := trap.Wait(ctx)
 				if err != nil {
