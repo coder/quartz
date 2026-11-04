@@ -980,7 +980,10 @@ func (c *mockCtx) cancelTree(err, cause error, stops *[]func() bool) {
 	// part of it even when it is being canceled.
 	var pending []*mockCtx
 	for _, child := range children {
-		// As in the context package, Err of the layers between c and child must not block.
+		// This goroutine calls Err and Value of the layers between c and child, here and through
+		// Cause in child.cancelTree, so they must not block. Stdlib calls a parent's Err and Value
+		// on the canceling goroutine only for a parent with its own AfterFunc method; it attaches a
+		// child of a layer over a cancelCtx to that cancelCtx instead.
 		if child.parent.Err() == nil {
 			continue
 		}
