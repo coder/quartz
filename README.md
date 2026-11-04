@@ -312,6 +312,69 @@ gotBaz := <-baz // ?? never trapped, so races with Advance()
 Tags appear as an optional suffix on all `Clock` methods (type `...string`) and are ignored entirely
 by the real clock. They also appear on all methods on returned timers and tickers.
 
+### Contexts
+
+`Clock` provides `WithDeadline`, `WithDeadlineCause`, `WithTimeout`, and `WithTimeoutCause` methods
+that mirror the standard `context` package. With a `*Mock`, contexts created through the clock
+expire on mock time:
+
+```go
+ctx, cancel := mClock.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+mClock.Advance(30 * time.Second).MustWait(testCtx)
+if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	t.Fatal("expected deadline exceeded")
+}
+```
+
+A canceled parent cancels the child. A parent created with `context.WithDeadline` or
+`context.WithTimeout` can still cancel the child on wall time because Quartz does not convert
+parent deadlines to mock time.
+
+When `cancel()` returns, or `Advance(...).MustWait()` returns after the clock reaches the deadline,
+the context is done, along with the contexts derived from it with the `context` package's `With`
+functions, other than `WithoutCancel`, or with the `With` methods of the `*Mock`, so the test can
+check them right away. This includes contexts derived through a wrapper that forwards `Done` and
+`Value`, such as a struct that embeds the context. A context derived through a `Context`
+implementation with its own `Done` channel may still be live, because the `context` package cancels
+it on another goroutine.
+
+When a cancellation starts at a parent from the `context` package, for example through its cancel
+function or its wall-clock deadline, `ctx.Err()` reports it at once, but contexts derived from `ctx`
+are canceled a moment later on another goroutine, and a `ctx.Done()` channel obtained earlier closes
+only then. Wait on the derived context's `Done()` or on that earlier channel instead of checking the
+derived context's `Err()`:
+
+```go
+parent, cancelParent := context.WithCancel(context.Background())
+ctx, cancel := mClock.WithTimeout(parent, time.Minute)
+defer cancel()
+child, cancelChild := context.WithCancel(ctx)
+defer cancelChild()
+
+cancelParent()
+select {
+case <-child.Done():
+case <-testCtx.Done():
+	t.Fatal("timed out waiting for the derived context")
+}
+```
+
+Contexts still live when the test ends are canceled with cause `quartz.ErrMockClockTestEnded`, and
+contexts created after the test ended are returned already canceled with that cause.
+
+Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
+removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
+
+#### `Deadline()` does not report mock time
+
+With a `*Mock`, `ctx.Done()` and `ctx.Err()` follow mock time, but `ctx.Deadline()` reports the
+parent's deadline, or a time in year 9999 if the parent has none. Libraries such as `net.Dialer`,
+`http.Client`, and gRPC compare the deadline with `time.Now()` and would otherwise treat the context
+as already expired. If your code needs the remaining mock time, compute it from the deadline or
+timeout you passed in.
+
 ## Recommended Patterns
 
 ### Options

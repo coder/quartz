@@ -77,4 +77,20 @@ func (realClock) Until(t time.Time, _ ...string) time.Duration {
 	return time.Until(t)
 }
 
+func (realClock) WithDeadline(parent context.Context, d time.Time, _ ...string) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(parent, d)
+}
+
+func (realClock) WithDeadlineCause(parent context.Context, d time.Time, cause error, _ ...string) (context.Context, context.CancelFunc) {
+	return context.WithDeadlineCause(parent, d, cause)
+}
+
+func (realClock) WithTimeout(parent context.Context, d time.Duration, _ ...string) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, d)
+}
+
+func (realClock) WithTimeoutCause(parent context.Context, d time.Duration, cause error, _ ...string) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(parent, d, cause)
+}
+
 var _ Clock = realClock{}

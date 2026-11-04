@@ -23,6 +23,13 @@ type TestingT interface {
 	Cleanup(func())
 }
 
+// ErrMockClockTestEnded is the context.Cause of a mock context that was still live when the test
+// ended; its Err is context.Canceled. Each context is canceled by a cleanup registered when the
+// context was created, so it is still live in cleanups registered after that, which run first. A
+// context created after the cleanup registered by NewMock has run, in a cleanup registered before
+// NewMock or by a goroutine that outlived the test, is returned already canceled with this cause.
+var ErrMockClockTestEnded = errors.New("quartz: mock clock test ended")
+
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
 // during a test, triggering any timers or tickers automatically.
 type Mock struct {
@@ -154,6 +161,122 @@ func (m *Mock) Until(t time.Time, tags ...string) time.Duration {
 	return t.Sub(m.cur)
 }
 
+func (m *Mock) WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc) {
+	c := newCall(clockFunctionWithDeadline, tags, withTime(d))
+	return m.newMockCtx(parent, c, nil, func() time.Time { return d })
+}
+
+func (m *Mock) WithDeadlineCause(parent context.Context, d time.Time, cause error, tags ...string) (context.Context, context.CancelFunc) {
+	c := newCall(clockFunctionWithDeadlineCause, tags, withTime(d), withCause(cause))
+	return m.newMockCtx(parent, c, cause, func() time.Time { return d })
+}
+
+func (m *Mock) WithTimeout(parent context.Context, d time.Duration, tags ...string) (context.Context, context.CancelFunc) {
+	c := newCall(clockFunctionWithTimeout, tags, withDuration(d))
+	return m.newMockCtx(parent, c, nil, func() time.Time { return m.cur.Add(d) })
+}
+
+func (m *Mock) WithTimeoutCause(parent context.Context, d time.Duration, cause error, tags ...string) (context.Context, context.CancelFunc) {
+	c := newCall(clockFunctionWithTimeoutCause, tags, withDuration(d), withCause(cause))
+	return m.newMockCtx(parent, c, cause, func() time.Time { return m.cur.Add(d) })
+}
+
+// newMockCtx creates the context for call. deadlineLocked is evaluated with m.mu held after any
+// traps release the call.
+func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, deadlineLocked func() time.Time) (context.Context, context.CancelFunc) {
+	// inner holds values and the cancellation cause. It does not inherit parent's cancellation, so
+	// only cancel() decides which error and cause the context reports.
+	inner, innerCancel := context.WithCancelCause(context.WithoutCancel(parent))
+	wallDeadline, ok := parent.Deadline()
+	if !ok {
+		wallDeadline = noWallDeadline
+	}
+	c := &mockCtx{
+		parent:       parent,
+		inner:        inner,
+		innerCancel:  innerCancel,
+		wallDeadline: wallDeadline,
+		finished:     make(chan struct{}),
+		cause:        cause,
+		mock:         m,
+		done:         make(chan struct{}),
+	}
+
+	m.mu.Lock()
+	m.matchCallLocked(call)
+	c.deadline = deadlineLocked()
+	pastDeadline := !c.deadline.After(m.cur)
+	// After the cleanup registered by NewMock has run, the cleanup below runs only after the
+	// caller's cleanup returns, or never if the test has finished, so cancel the context now.
+	testOver := m.testOver
+	if !pastDeadline {
+		m.addEventLocked(c)
+	}
+	m.tb.Cleanup(func() { c.cancel(context.Canceled, ErrMockClockTestEnded) })
+	close(call.complete)
+	m.mu.Unlock()
+
+	if testOver {
+		c.cancel(context.Canceled, ErrMockClockTestEnded)
+	} else if pastDeadline {
+		c.cancel(context.DeadlineExceeded, cause)
+	}
+	var stop func() bool
+	// Register with the nearest mock context, also behind layers that forward Value such as
+	// context.WithValue, so c is canceled before that context's cancellation returns, as stdlib
+	// children are. When Done differs, a layer between them, such as context.WithCancel, can
+	// also be canceled on its own, as in stdlib's parentCancelCtx, so c registers with parent as
+	// well.
+	p, ok := parent.Value(mockCtxViewKey{}).(*mockCtxView)
+	switch {
+	case ok && parent.Done() == p.std.Done():
+		stop = p.c.registerChild(c)
+	case ok:
+		stopChild, stopAfterFunc := p.c.registerChild(c), context.AfterFunc(parent, c.checkParent)
+		stop = func() bool {
+			stopped := stopChild()
+			return stopAfterFunc() || stopped
+		}
+	default:
+		stop = context.AfterFunc(parent, c.checkParent)
+	}
+	c.mock.mu.Lock()
+	c.stopParent = stop
+	done := c.err != nil
+	c.mock.mu.Unlock()
+	if done {
+		stop()
+	}
+	std, stdCancel := context.WithCancel(c)
+	return &mockCtxView{std: std, c: c}, func() {
+		c.cancel(context.Canceled, nil)
+		// If another goroutine canceled c first, it may still be canceling std and the mock
+		// contexts registered with c. Wait for that, as a stdlib cancel that loses a race does.
+		// finished does not wait for the functions that unregister those contexts from their
+		// parents, which can block in user code. stdCancel is then a no-op, called because
+		// WithCancel requires it.
+		<-c.finished
+		<-std.Done()
+		stdCancel()
+	}
+}
+
+// checkDoneContexts cancels contexts whose parents are done, so their pending events do not block
+// Advance or show up in Peek.
+func (m *Mock) checkDoneContexts() {
+	m.mu.Lock()
+	var ctxs []*mockCtx
+	for _, e := range m.all {
+		if c, ok := e.(*mockCtx); ok {
+			ctxs = append(ctxs, c)
+		}
+	}
+	m.mu.Unlock()
+	for _, c := range ctxs {
+		c.checkParent()
+	}
+}
+
 func (m *Mock) addEventLocked(e event) {
 	m.all = append(m.all, e)
 	m.recomputeNextLocked()
@@ -270,6 +393,7 @@ func (w AdvanceWaiter) Done() <-chan struct{} {
 func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
+	m.checkDoneContexts()
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - Advance(%s)", d)
@@ -320,6 +444,7 @@ func (m *Mock) advanceLocked(w AdvanceWaiter) {
 func (m *Mock) Set(t time.Time) AdvanceWaiter {
 	m.tb.Helper()
 	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
+	m.checkDoneContexts()
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - Set(%s)", t)
@@ -359,6 +484,7 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 // none scheduled.  It returns the duration the clock was advanced and a waiter that can be used to
 // wait for the timer/tick event(s) to finish.
 func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
+	m.checkDoneContexts()
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - AdvanceNext()")
@@ -381,6 +507,7 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 // true, or, if there are no running tickers or timers, it returns zero and
 // false.
 func (m *Mock) Peek() (d time.Duration, ok bool) {
+	m.checkDoneContexts()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.nextTime.IsZero() {
@@ -442,6 +569,22 @@ func (t Trapper) Since(tags ...string) *Trap {
 
 func (t Trapper) Until(tags ...string) *Trap {
 	return t.mock.newTrap(clockFunctionUntil, tags)
+}
+
+func (t Trapper) WithDeadline(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithDeadline, tags)
+}
+
+func (t Trapper) WithDeadlineCause(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithDeadlineCause, tags)
+}
+
+func (t Trapper) WithTimeout(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithTimeout, tags)
+}
+
+func (t Trapper) WithTimeoutCause(tags ...string) *Trap {
+	return t.mock.newTrap(clockFunctionWithTimeoutCause, tags)
 }
 
 func (m *Mock) Trap() Trapper {
@@ -561,12 +704,14 @@ func (m *mockTickerFunc) exitLocked(err error) {
 
 func (m *mockTickerFunc) waitForCtx() {
 	<-m.ctx.Done()
+	// Read before taking mock.mu: Err() takes mock.mu when ctx is a context from this Mock.
+	err := m.ctx.Err()
 	m.mock.mu.Lock()
 	defer m.mock.mu.Unlock()
 	for m.inProgress {
 		m.cond.Wait()
 	}
-	m.exitLocked(m.ctx.Err())
+	m.exitLocked(err)
 }
 
 func (m *mockTickerFunc) Wait(tags ...string) error {
@@ -583,6 +728,303 @@ func (m *mockTickerFunc) Wait(tags ...string) error {
 
 var _ Waiter = &mockTickerFunc{}
 
+type mockCtx struct {
+	mock   *Mock
+	parent context.Context
+
+	// inner stores the cancellation cause so context.Cause() can find it via Value(&cancelCtxKey).
+	// Done() must NOT return inner.Done(): stdlib's parentCancelCtx fast-path would then attach
+	// descendants directly to inner, and they would read inner's context.Canceled Err() on deadline
+	// fire instead of ours.
+	inner       context.Context
+	innerCancel context.CancelCauseFunc
+	// deadline is in mock time and schedules the event.
+	deadline time.Time
+	// wallDeadline is what Deadline() reports; see noWallDeadline.
+	wallDeadline time.Time
+	// children holds the mock contexts registered through registerChild and is guarded by
+	// mock.mu. finished is closed once c and every mock context canceled with it are canceled. It
+	// does not wait for cancel to unregister them from their parents.
+	children []*mockCtx
+	finished chan struct{}
+
+	// Cause recorded when the deadline fires.
+	cause error
+
+	// err, done, afterFuncs, and stopParent are guarded by mock.mu. err and done are written
+	// together.
+	err        error
+	done       chan struct{}
+	afterFuncs []*afterFunc
+	stopParent func() bool
+}
+
+// afterFunc gives each registration a pointer identity for stop to find; funcs are not comparable.
+type afterFunc struct{ f func() }
+
+// noWallDeadline is what Deadline() reports for a mock context whose parent has no deadline.
+//
+// Code that reads ctx.Deadline() compares it with time.Now() or hands it to wall-clock APIs such as
+// net.Dialer, net.Conn.SetDeadline, http.Client, gRPC, and x/time/rate. Mock time is unrelated to
+// wall time, so reporting the mock deadline makes those consumers see an expired deadline, and
+// converting it to wall time would make a mock timeout expire real I/O. Reporting the parent's
+// deadline, or a deadline that never arrives, keeps ok == true for code that requires a deadline
+// while leaving expiry to Done() and Err(), which follow mock time.
+var noWallDeadline = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
+
+// AfterFunc lets the stdlib context behind c's mockCtxView register for cancellation instead of
+// starting a goroutine that waits on Done (see context.afterFuncer). Registered functions run
+// before the call that cancels c returns, so that context and its descendants are done by the time
+// cancel() or Advance().MustWait() returns.
+func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
+	c.mock.mu.Lock()
+	defer c.mock.mu.Unlock()
+	if c.err != nil {
+		// The caller may hold locks that f takes, so f must not run on this goroutine.
+		go f()
+		return func() bool { return false }
+	}
+	a := &afterFunc{f: f}
+	c.afterFuncs = append(c.afterFuncs, a)
+	return func() bool {
+		c.mock.mu.Lock()
+		defer c.mock.mu.Unlock()
+		for i, x := range c.afterFuncs {
+			if x == a {
+				// slices.Delete zeroes the vacated slot, so the backing array stops referencing
+				// the stopped function and the done child context it may hold.
+				c.afterFuncs = slices.Delete(c.afterFuncs, i, i+1)
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// registerChild registers child, a mock context created from c's mockCtxView directly or behind
+// other layers, so c's cancellation cancels it before the call that cancels c returns. Unlike an
+// AfterFunc registration, cancel unregisters child from its parents only after it has canceled
+// every context registered with c, directly or below.
+func (c *mockCtx) registerChild(child *mockCtx) (stop func() bool) {
+	c.mock.mu.Lock()
+	defer c.mock.mu.Unlock()
+	if c.err != nil {
+		// checkParent takes mock.mu, which this goroutine holds.
+		go child.checkParent()
+		return func() bool { return false }
+	}
+	c.children = append(c.children, child)
+	return func() bool {
+		c.mock.mu.Lock()
+		defer c.mock.mu.Unlock()
+		i := slices.Index(c.children, child)
+		if i < 0 {
+			return false
+		}
+		// slices.Delete zeroes the vacated slot, so the backing array stops referencing child.
+		c.children = slices.Delete(c.children, i, i+1)
+		return true
+	}
+}
+
+func (c *mockCtx) Deadline() (time.Time, bool) {
+	return c.wallDeadline, true
+}
+
+// mockCtxView is the context that WithDeadline, WithTimeout, and their Cause variants return. Its
+// Done, Err, and Value come from std, the context.WithCancel(c) that newMockCtx creates. std
+// registers with c through c.AfterFunc, so it is canceled with c's error and cause before the
+// call that cancels c returns. Stdlib finds std through Done and Value and attaches derived
+// contexts to it directly, also through layers that do not cancel, such as context.WithValue, so
+// they are done when std is.
+type mockCtxView struct {
+	std context.Context
+	c   *mockCtx
+}
+
+// mockCtxViewKey is the Value key under which a mockCtxView returns itself, so newMockCtx can find
+// the nearest mock context behind layers such as context.WithValue.
+type mockCtxViewKey struct{}
+
+func (v *mockCtxView) Deadline() (time.Time, bool) {
+	return v.c.Deadline()
+}
+
+// Done, Err, and Value check the parent first because stdlib contexts are done as soon as their
+// parent is, but c may learn of its parent's cancellation from a goroutine. Only the cancellation
+// of the mock context that c registered with reaches c on the canceling goroutine. A cancellation
+// that starts anywhere else, such as at a parent from the context package or at a layer between c
+// and that mock context, reaches c from a goroutine, as does one that happened before c
+// registered. Value is included because context.Cause reads the cause through it. A Done channel
+// obtained before the parent was canceled closes when that goroutine runs.
+func (v *mockCtxView) Done() <-chan struct{} {
+	v.checkParent()
+	return v.std.Done()
+}
+
+func (v *mockCtxView) Value(key any) any {
+	if key == (mockCtxViewKey{}) {
+		return v
+	}
+	v.checkParent()
+	return v.std.Value(key)
+}
+
+func (v *mockCtxView) Err() error {
+	v.checkParent()
+	return v.std.Err()
+}
+
+// checkParent cancels c if its parent is done, then waits for std if c is done. std is canceled
+// after c: by the goroutine that canceled c, or by a goroutine that c.AfterFunc starts if c was
+// canceled after context.WithCancel found c's Done open but before it called c.AfterFunc. Without
+// the wait, Err could return nil after the parent's cancel returned, because c.checkParent returns
+// at once while the parent's AfterFunc goroutine is canceling c.
+func (v *mockCtxView) checkParent() {
+	v.c.checkParent()
+	select {
+	case <-v.c.done:
+		<-v.std.Done()
+	default:
+	}
+}
+
+// Done, Err, and Value report c's own state without checking the parent; mockCtxView checks it.
+func (c *mockCtx) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *mockCtx) Value(key any) any {
+	return c.inner.Value(key)
+}
+
+func (c *mockCtx) Err() error {
+	c.mock.mu.Lock()
+	defer c.mock.mu.Unlock()
+	return c.err
+}
+
+func (c *mockCtx) next() time.Time {
+	return c.deadline
+}
+
+func (c *mockCtx) fire(_ time.Time) {
+	c.cancel(context.DeadlineExceeded, c.cause)
+	// Advance().MustWait() waits for fire, so wait for mock descendants that other goroutines are
+	// still canceling.
+	<-c.finished
+}
+
+// checkParent cancels c if its parent is done. A canceled c returns without reading the parent:
+// cancel reads the parent again, and each read checks the grandparent the same way, so reading a
+// canceled chain of mock contexts would cost parent reads exponential in its depth.
+func (c *mockCtx) checkParent() {
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+	if c.parent.Err() != nil {
+		c.cancel(context.Canceled, nil)
+	}
+}
+
+// cancel cancels c and the contexts registered with it, then unregisters them from their parents.
+// It matches stdlib cancelCtx.cancel(): a nil cause defaults to err. If the parent is already done,
+// its error and cause win, as they do when stdlib propagates cancellation.
+func (c *mockCtx) cancel(err, cause error) {
+	var stops []func() bool
+	c.cancelTree(err, cause, &stops)
+	for _, stop := range stops {
+		stop()
+	}
+}
+
+// cancelTree cancels c, then the contexts registered with it, and closes finished once they are
+// done. It appends the functions that unregister c and its mock descendants from their parents to
+// stops instead of calling them: they call into the parents, which can block in user code, and
+// callers of cancel() and fire wait for finished.
+//
+// cancelTree takes mock.mu. It reads the parent's error and cause before that, because parent.Err()
+// also takes mock.mu when parent is a context from this Mock.
+func (c *mockCtx) cancelTree(err, cause error, stops *[]func() bool) {
+	if perr := c.parent.Err(); perr != nil {
+		err, cause = perr, context.Cause(c.parent)
+	}
+	if cause == nil {
+		cause = err
+	}
+	c.mock.mu.Lock()
+	if c.err != nil {
+		c.mock.mu.Unlock()
+		return
+	}
+	c.err = err
+	c.mock.removeEventLocked(c)
+	c.innerCancel(cause)
+	close(c.done)
+	stop := c.stopParent
+	afterFuncs := c.afterFuncs
+	c.afterFuncs = nil
+	children := c.children
+	c.children = nil
+	c.mock.mu.Unlock()
+	// Without mock.mu: derived contexts call c.Err() while canceling. std goes first: children
+	// read c through its view, which waits for std, and a stdlib layer between c and a child is
+	// canceled through std.
+	for _, a := range afterFuncs {
+		a.f()
+	}
+	// A child whose parent is canceled is part of this cancellation. If another goroutine is
+	// already canceling it, for example stdlib's AfterFunc goroutine for a layer that std just
+	// canceled, it is pending: finished waits for it. Waiting here instead could deadlock, because
+	// reading a child's parent can cancel an ancestor whose tree this goroutine is already running.
+	// A child behind a layer that does not cancel with c, such as context.WithoutCancel, is not
+	// part of it even when it is being canceled.
+	var pending []*mockCtx
+	for _, child := range children {
+		// This goroutine calls Err and Value of the layers between c and child, here and through
+		// Cause in child.cancelTree, so they must not block. Stdlib calls a parent's Err and Value
+		// on the canceling goroutine only for a parent with its own AfterFunc method; it attaches a
+		// child of a layer over a cancelCtx to that cancelCtx instead.
+		if child.parent.Err() == nil {
+			continue
+		}
+		child.cancelTree(context.Canceled, nil, stops)
+		if child.canceling() {
+			pending = append(pending, child)
+		}
+	}
+	if len(pending) == 0 {
+		close(c.finished)
+	} else {
+		go func() {
+			for _, child := range pending {
+				<-child.finished
+			}
+			close(c.finished)
+		}()
+	}
+	if stop != nil {
+		*stops = append(*stops, stop)
+	}
+}
+
+// canceling reports whether c is canceled and its finished channel is still open.
+func (c *mockCtx) canceling() bool {
+	select {
+	case <-c.finished:
+		return false
+	default:
+	}
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
 type clockFunction int
 
 const (
@@ -598,6 +1040,10 @@ const (
 	clockFunctionNow
 	clockFunctionSince
 	clockFunctionUntil
+	clockFunctionWithDeadline
+	clockFunctionWithDeadlineCause
+	clockFunctionWithTimeout
+	clockFunctionWithTimeoutCause
 )
 
 func (c clockFunction) String() string {
@@ -626,6 +1072,14 @@ func (c clockFunction) String() string {
 		return "Since"
 	case clockFunctionUntil:
 		return "Until"
+	case clockFunctionWithDeadline:
+		return "WithDeadline"
+	case clockFunctionWithDeadlineCause:
+		return "WithDeadlineCause"
+	case clockFunctionWithTimeout:
+		return "WithTimeout"
+	case clockFunctionWithTimeoutCause:
+		return "WithTimeoutCause"
 	default:
 		return fmt.Sprintf("Unknown clockFunction(%d)", c)
 	}
@@ -637,6 +1091,7 @@ type callArg func(c *apiCall)
 type apiCall struct {
 	Time     time.Time
 	Duration time.Duration
+	Cause    error
 	Tags     []string
 
 	fn       clockFunction
@@ -670,6 +1125,14 @@ func (a *apiCall) String() string {
 		return fmt.Sprintf("Since(%s, %v)", a.Time, a.Tags)
 	case clockFunctionUntil:
 		return fmt.Sprintf("Until(%s, %v)", a.Time, a.Tags)
+	case clockFunctionWithDeadline:
+		return fmt.Sprintf("WithDeadline(<ctx>, %s, %v)", a.Time, a.Tags)
+	case clockFunctionWithDeadlineCause:
+		return fmt.Sprintf("WithDeadlineCause(<ctx>, %s, cause=%v, %v)", a.Time, a.Cause, a.Tags)
+	case clockFunctionWithTimeout:
+		return fmt.Sprintf("WithTimeout(<ctx>, %s, %v)", a.Duration, a.Tags)
+	case clockFunctionWithTimeoutCause:
+		return fmt.Sprintf("WithTimeoutCause(<ctx>, %s, cause=%v, %v)", a.Duration, a.Cause, a.Tags)
 	default:
 		return fmt.Sprintf("Unknown clockFunction(%d)", a.fn)
 	}
@@ -679,6 +1142,7 @@ func (a *apiCall) String() string {
 type Call struct {
 	Time     time.Time
 	Duration time.Duration
+	Cause    error // Cause passed to a cause variant, if applicable.
 	Tags     []string
 
 	tb      TestingT
@@ -724,6 +1188,12 @@ func withTime(t time.Time) callArg {
 func withDuration(d time.Duration) callArg {
 	return func(c *apiCall) {
 		c.Duration = d
+	}
+}
+
+func withCause(err error) callArg {
+	return func(c *apiCall) {
+		c.Cause = err
 	}
 }
 
@@ -814,6 +1284,7 @@ func (t *Trap) Wait(ctx context.Context) (*Call, error) {
 		c := &Call{
 			Time:     a.Time,
 			Duration: a.Duration,
+			Cause:    a.Cause,
 			Tags:     a.Tags,
 			apiCall:  a,
 			trap:     t,
