@@ -73,7 +73,6 @@ func (t *Ticker) Stop(tags ...string) {
 	defer close(c.complete)
 	t.mock.removeEventLocked(t)
 	t.stopped = true
-	// check if we've already fired, and if so, interrupt it.
 	t.stopRunLoopLocked()
 }
 
