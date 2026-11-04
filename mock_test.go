@@ -530,6 +530,12 @@ func TestTimer_StopAndReset(t *testing.T) {
 	}
 	// NewTimer(0) fires from a new goroutine, which can run before or after the call.
 	zeroDuration := func(_ context.Context, m *quartz.Mock) *quartz.Timer { return m.NewTimer(0) }
+	// Advance fires the timer from a new goroutine, which can run before or after the call.
+	advancing := func(_ context.Context, m *quartz.Mock) *quartz.Timer {
+		tmr := m.NewTimer(time.Second)
+		_ = m.Advance(time.Second)
+		return tmr
+	}
 	stop := func(tmr *quartz.Timer) bool { return tmr.Stop() }
 	reset := func(tmr *quartz.Timer) bool { return tmr.Reset(time.Hour) }
 	// stopAndDrain is the way to stop a timer before Go 1.23. It returns false if the receive
@@ -559,6 +565,11 @@ func TestTimer_StopAndReset(t *testing.T) {
 		{name: "StopZeroDuration", start: zeroDuration, call: stop, want: true},
 		{
 			name: "ResetZeroDuration", start: zeroDuration, call: reset,
+			want: true, wantNext: time.Hour,
+		},
+		{name: "StopDuringAdvance", start: advancing, call: stop, want: true},
+		{
+			name: "ResetDuringAdvance", start: advancing, call: reset,
 			want: true, wantNext: time.Hour,
 		},
 	} {
