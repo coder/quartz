@@ -84,6 +84,9 @@ func (t *Ticker) Reset(d time.Duration, tags ...string) {
 		t.ticker.Reset(d)
 		return
 	}
+	if d <= 0 {
+		panic("Ticker.Reset called with negative or zero duration")
+	}
 	t.mock.mu.Lock()
 	defer t.mock.mu.Unlock()
 	c := newCall(clockFunctionTickerReset, tags, withDuration(d))

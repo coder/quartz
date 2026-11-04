@@ -843,6 +843,25 @@ func TestNoLeak_Go123(t *testing.T) {
 	})
 }
 
+// TestTickerReset_NonPositiveDuration checks that Reset panics for a duration that is not positive,
+// as time.Ticker.Reset and NewTicker do. A mock ticker with such a period made the next fire loop
+// forever with the Mock's lock held.
+func TestTickerReset_NonPositiveDuration(t *testing.T) {
+	t.Parallel()
+	for _, d := range []time.Duration{0, -time.Second} {
+		t.Run(d.String(), func(t *testing.T) {
+			t.Parallel()
+			tkr := quartz.NewMock(t).NewTicker(time.Second)
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Reset(%s) did not panic", d)
+				}
+			}()
+			tkr.Reset(d)
+		})
+	}
+}
+
 // TestTicker_StopAndReset checks that no tick is received after Stop or Reset returns, and that
 // Reset's period applies, as with a time.Ticker.
 func TestTicker_StopAndReset(t *testing.T) {
