@@ -361,11 +361,27 @@ case <-testCtx.Done():
 }
 ```
 
-Contexts still live when the test ends are canceled with cause `quartz.ErrMockClockTestEnded`, and
-contexts created after the test ended are returned already canceled with that cause.
-
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
+
+#### At test end
+
+When the test ends, each mock context that is still live is canceled with cause
+`quartz.ErrMockClockTestEnded`, so code blocked on it can return. The cancellation is a cleanup that
+the context registers on the `t` passed to `NewMock` when it is created, and cleanups run last
+registered first. So a cleanup registered before the context was created, such as a
+`t.Cleanup(srv.Close)` that waits for a handler blocked on the context, sees it canceled and does
+not hang, while cleanups registered after see it live. A subtest's cleanups run before its parent's,
+so if a subtest uses a `*Mock` created with the parent's `t`, its contexts are still live there and
+such a `srv.Close` hangs; create the `*Mock` with the subtest's `t`. A context created after the
+test ended, for example by a goroutine that outlived it, is returned already canceled with the same
+cause.
+
+Mock timers and tickers are not canceled. A ticker from `NewTicker` stops sending on `C` in a
+cleanup that it registers when it is created, and a timer from `NewTimer` drops its unread value in
+a cleanup that it registers when it fires. A cleanup registered before those cannot receive from
+`C`, so if it waits for code that reads `C`, have that code also select on a context that is done by
+then, such as a mock context created after the cleanup was registered.
 
 #### `Deadline()` does not report mock time
 
