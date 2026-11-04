@@ -791,7 +791,9 @@ func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
 		defer c.mock.mu.Unlock()
 		for i, x := range c.afterFuncs {
 			if x == a {
-				c.afterFuncs = append(c.afterFuncs[:i], c.afterFuncs[i+1:]...)
+				// slices.Delete zeroes the vacated slot, so the backing array stops referencing
+				// the stopped function and the done child context it may hold.
+				c.afterFuncs = slices.Delete(c.afterFuncs, i, i+1)
 				return true
 			}
 		}
