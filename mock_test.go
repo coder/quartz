@@ -332,21 +332,14 @@ func Test_MultipleTraps(t *testing.T) {
 	defer testCancel()
 	mClock := quartz.NewMock(t)
 
-	// Reusing a tag slice after the call returns must not change the traps or the trapped calls.
-	trapTags := []string{"0"}
-	trap0 := mClock.Trap().Now(trapTags...)
+	trap0 := mClock.Trap().Now("0")
 	defer trap0.Close()
-	trapTags[0] = "1"
-	trap1 := mClock.Trap().Now(trapTags...)
+	trap1 := mClock.Trap().Now("1")
 	defer trap1.Close()
-	trapTags[0] = "reused"
 
 	timeCh := make(chan time.Time)
 	go func() {
-		callTags := []string{"0", "1"}
-		now := mClock.Now(callTags...)
-		callTags[0], callTags[1] = "reused", "reused"
-		timeCh <- now
+		timeCh <- mClock.Now("0", "1")
 	}()
 
 	c0 := trap0.MustWait(testCtx)
@@ -377,12 +370,6 @@ func Test_MultipleTraps(t *testing.T) {
 		}
 	case <-testCtx.Done():
 		t.Fatal("timed out waiting for Now()")
-	}
-
-	for _, c := range []*quartz.Call{c0, c1} {
-		if want := []string{"0", "1"}; !slices.Equal(c.Tags, want) {
-			t.Fatalf("expected tags %v, got %v", want, c.Tags)
-		}
 	}
 }
 
@@ -426,6 +413,33 @@ func Test_UnreleasedCalls(t *testing.T) {
 
 		c.Release(testCtx) // clean up goroutine
 	})
+}
+
+func TestTags_CallerReusesSlice(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	mClock := quartz.NewMock(t)
+
+	trapTags := []string{"foo"}
+	trap := mClock.Trap().Now(trapTags...)
+	defer trap.Close()
+	trapTags[0] = "reused"
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		callTags := []string{"foo"}
+		mClock.Now(callTags...)
+		callTags[0] = "reused"
+	}()
+
+	call := trap.MustWait(testCtx)
+	call.MustRelease(testCtx)
+	<-done
+	if want := []string{"foo"}; !slices.Equal(call.Tags, want) {
+		t.Fatalf("expected tags %v, got %v", want, call.Tags)
+	}
 }
 
 func Test_WithLogger(t *testing.T) {
