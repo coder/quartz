@@ -372,25 +372,45 @@ func Test_MultipleTraps(t *testing.T) {
 	}
 }
 
+// Test_MultipleTrapsDeadlock verifies that Release fails while another trap still holds the call,
+// and that the call still counts as released, so Close does not report it.
 func Test_MultipleTrapsDeadlock(t *testing.T) {
 	t.Parallel()
-	tRunFail(t, func(t testing.TB) {
-		testCtx, testCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer testCancel()
-		mClock := quartz.NewMock(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	expired, cancelExpired := context.WithCancel(context.Background())
+	cancelExpired()
 
-		trap0 := mClock.Trap().Now("0")
-		defer trap0.Close()
-		trap1 := mClock.Trap().Now("1")
-		defer trap1.Close()
+	tb := &captureFailTB{TB: t}
+	mClock := quartz.NewMock(tb)
+	trap0 := mClock.Trap().Now("0")
+	trap1 := mClock.Trap().Now("1")
 
-		go func() {
-			mClock.Now("0", "1")
-		}()
+	go func() {
+		mClock.Now("0", "1")
+	}()
 
-		c0 := trap0.MustWait(testCtx)
-		c0.MustRelease(testCtx) // deadlocks, test failure
-	})
+	c0, err := trap0.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The call cannot complete until trap1 releases it too.
+	if err := c0.Release(expired); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Release() = %v, want %v", err, context.Canceled)
+	}
+	c1, err := trap1.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c1.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	trap0.Close()
+	trap1.Close()
+	if tb.failed {
+		t.Fatal("Close() reported a failure after both calls were released")
+	}
 }
 
 func Test_UnreleasedCalls(t *testing.T) {

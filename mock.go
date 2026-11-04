@@ -693,6 +693,8 @@ type Call struct {
 // they must do so from different goroutines.
 func (c *Call) Release(ctx context.Context) error {
 	c.apiCall.releases.Done()
+	// The call is released now, whether or not it completes before ctx expires.
+	c.trap.callReleased()
 	select {
 	case <-ctx.Done():
 		// select picks randomly among ready cases; report completion if it also happened.
@@ -704,7 +706,6 @@ func (c *Call) Release(ctx context.Context) error {
 	case <-c.apiCall.complete:
 		// OK
 	}
-	c.trap.callReleased()
 	return nil
 }
 
