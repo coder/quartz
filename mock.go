@@ -217,9 +217,9 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	if !pastDeadline {
 		m.addEventLocked(c)
 	}
-	// Each context registers its own cleanup so it is canceled before cleanups registered before it
-	// run (see ErrMockClockTestEnded). The cleanup holds only the ref, which cancel clears, so a
-	// done context is not kept reachable until the test ends.
+	// Each context registers its own cleanup so it is canceled before the cleanups registered
+	// before it that have not started yet (see ErrMockClockTestEnded). The cleanup holds only the
+	// ref, which cancel clears, so a done context is not kept reachable until the test ends.
 	ref := c.testEndRef
 	m.tb.Cleanup(func() {
 		m.mu.Lock()
