@@ -440,8 +440,8 @@ existing unit tests.
 ## Quartz and `testing/synctest`
 
 Since Go 1.25, [`synctest.Test`](https://pkg.go.dev/testing/synctest) runs a test in a "bubble"
-whose fake clock moves forward when every goroutine in the bubble is
-[durably blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-dependent code:
+whose fake clock moves forward when every goroutine in the bubble is [durably
+blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-dependent code:
 
 - If the test does no real I/O, run it in `synctest.Test` and keep the production
   `quartz.NewReal()`. Inside a bubble it runs on bubble time, so you need no `*Mock`, `Advance()`,
@@ -476,8 +476,8 @@ Inside a bubble:
   `time.Sleep`, timeout, or `synctest.Wait()`, and `synctest.Test` does not return until that
   goroutine exits.
 - Create a `*Mock` with the `t` that `synctest.Test` passes in. Cleanup on the outer test's `t` runs
-  outside the bubble and can crash the test binary with a fatal error such as
-  `close of synctest channel from outside bubble`.
+  outside the bubble and can crash the test binary with a fatal error about a
+  `synctest channel from outside bubble`.
 - With a `*Mock`, `synctest.Wait()` replaces traps that only wait for code to reach a clock call. It
   returns once every other goroutine in the bubble is durably blocked, for example on the timer it
   just created, so a following `Advance()` fires that timer.
