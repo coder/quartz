@@ -233,9 +233,9 @@ type AdvanceWaiter struct {
 	ch chan struct{}
 }
 
-// Wait for all timers and ticks to complete, or until context expires.
-// If ctx has expired, Wait returns its error even if the advance has completed. To check for
-// completion without a deadline, use Done.
+// Wait for all timers and ticks to complete, or until the context expires.
+// If the context has expired, Wait returns its error even if the advance has completed. To check
+// for completion without a deadline, use Done.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
 	case <-w.ch:
@@ -251,8 +251,8 @@ func (w AdvanceWaiter) Wait(ctx context.Context) error {
 // running the test or benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
 	w.tb.Helper()
-	// Decide from ctx on entry, not from whether the advance completed: it can complete just after
-	// ctx expires during the wait, or still be pending when ctx had expired before the call.
+	// A context that had already expired is a mistake in the test, not a slow advance, so it gets
+	// its own message, decided before waiting.
 	if err := ctx.Err(); err != nil {
 		w.tb.Fatalf("context already expired when MustWait was called: %s", err)
 		return
@@ -649,7 +649,8 @@ type apiCall struct {
 	fn       clockFunction
 	releases sync.WaitGroup
 	complete chan struct{}
-	// trapCount is the number of traps that caught the call.
+	// trapCount is the number of traps that caught the call. matchCallLocked sets it before it
+	// starts the catch goroutines, and it is read-only after that.
 	trapCount int
 }
 
@@ -695,9 +696,9 @@ type Call struct {
 	trap    *Trap
 }
 
-// Release the call and wait for it to complete. If the provided context expires before the call completes, it returns
-// an error.
-// If the context has already expired, Release still releases the call and returns the error.
+// Release the call and wait for it to complete. If the provided context expires before the call
+// completes, it returns an error. If the context has already expired, Release releases the call
+// and returns the context's error without waiting.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
@@ -730,8 +731,8 @@ func (c *Call) releaseError(err error) error {
 	return fmt.Errorf("timed out waiting for the call to complete after release: %w", err)
 }
 
-// MustRelease releases the call and waits for it to complete. If the provided context expires before the call
-// completes, it fails the test.
+// MustRelease releases the call and waits for it to complete. It fails the test if the context
+// expires before the call completes or had already expired; the call is released either way.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
