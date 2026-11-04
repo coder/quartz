@@ -862,6 +862,41 @@ func TestTickerReset_NonPositiveDuration(t *testing.T) {
 	}
 }
 
+// TestTicker_ResetInBubble resets a running ticker from a synctest bubble that did not create its
+// Mock. Reset must start no goroutine there: one waiting on the Mock's channels, which belong to no
+// bubble, keeps synctest.Test from returning, and go test -timeout then stops the run with this
+// test's synctest.Test call in the stack.
+func TestTicker_ResetInBubble(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		tick bool
+	}{
+		{name: "Running"},
+		// runLoop holds the tick for a reader when Reset is called.
+		{name: "TickedUnread", tick: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			mClock := quartz.NewMock(t)
+			tkr := mClock.NewTicker(time.Second)
+			defer tkr.Stop()
+			if tc.tick {
+				mClock.Advance(time.Second).MustWait(ctx)
+			}
+			synctest.Test(t, func(*testing.T) { tkr.Reset(time.Hour) })
+			mClock.Advance(time.Hour).MustWait(ctx)
+			// A tick kept from the old schedule would be received first.
+			if got, want := <-tkr.C, mClock.Now(); !got.Equal(want) {
+				t.Errorf("received the tick for %s, want the one for %s", got, want)
+			}
+		})
+	}
+}
+
 // TestTicker_StopAndReset checks that no tick is received after Stop or Reset returns, and that
 // Reset's period applies, as with a time.Ticker.
 func TestTicker_StopAndReset(t *testing.T) {
