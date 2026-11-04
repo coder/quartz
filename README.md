@@ -367,10 +367,10 @@ contexts created after the test ended are returned already canceled with that ca
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
 
-To trap the calls that create a context, use `mClock.Trap().WithTimeout()` or
-`mClock.Trap().WithDeadline()`. They also catch calls to `WithTimeoutCause` and `WithDeadlineCause`,
-so the test keeps working if the code switches variants. The trapped call's `Cause` field holds the
-cause passed to a cause variant.
+To trap the calls that create a context, use `mClock.Trap().WithTimeout()`, which also catches
+`WithTimeoutCause` calls, or `mClock.Trap().WithDeadline()`, which also catches `WithDeadlineCause`
+calls. The test then keeps working if the code switches variants. The trapped call's `Cause` field
+holds the cause passed to a cause variant.
 
 #### `Deadline()` does not report mock time
 
