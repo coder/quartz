@@ -382,10 +382,8 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 // AdvanceWaiter is returned from Advance and Set calls and allows you to wait for the triggered
 // events to complete.  In the case of functions passed to AfterFunc or TickerFunc, it waits for the
 // functions to return.  For other ticks & timers, it just waits for the tick to be delivered to the
-// channel.  For a mock context, it waits until the context is done, along with the contexts derived
-// from it with the context package's With functions, other than WithoutCancel, or with this Mock's
-// With methods.  A context derived through a Context implementation with its own Done channel may
-// still be live, because the context package cancels it on another goroutine.
+// channel.  For a mock context, it waits until the context is done, along with the derived contexts
+// that Clock.WithDeadline lists.
 //
 // If multiple events trigger simultaneously, they are all run on separate go routines.
 type AdvanceWaiter struct {
