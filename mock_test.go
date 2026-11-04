@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/quartz"
@@ -847,6 +848,32 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 // the context expires, even if the trap is closed.
 func TestTrapWait_ExpiredContext(t *testing.T) {
 	t.Parallel()
+
+	t.Run("MustWait", func(t *testing.T) {
+		t.Parallel()
+		synctest.Test(t, func(t *testing.T) {
+			tb := &captureFailTB{TB: t}
+			mClock := quartz.NewMock(tb)
+			trap := mClock.Trap().Now()
+			defer trap.Close()
+
+			expired, cancel := context.WithCancel(t.Context())
+			cancel()
+			trap.MustWait(expired)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				trap.MustWait(ctx)
+			}()
+			synctest.Wait() // MustWait is blocked waiting for a call.
+			cancel()
+			<-done
+			wantMessages(t, tb.messages, "context already expired when MustWait was called for Trap Now(",
+				"context expired while waiting for Trap Now(")
+		})
+	})
 
 	t.Run("TrapClosed", func(t *testing.T) {
 		t.Parallel()

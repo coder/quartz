@@ -874,6 +874,12 @@ func (t *Trap) Wait(ctx context.Context) (*Call, error) {
 // test via tb.Fatalf()
 func (t *Trap) MustWait(ctx context.Context) *Call {
 	t.mock.tb.Helper()
+	// As in AdvanceWaiter.MustWait, a context that had already expired is a mistake in the test,
+	// so it gets its own message, decided before waiting.
+	if err := ctx.Err(); err != nil {
+		t.mock.tb.Fatalf("context already expired when MustWait was called for %s: %s", t, err)
+		return nil
+	}
 	c, err := t.Wait(ctx)
 	if err != nil {
 		t.mock.tb.Fatalf("context expired while waiting for %s: %s", t, err.Error())
