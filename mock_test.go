@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -412,6 +413,33 @@ func Test_UnreleasedCalls(t *testing.T) {
 
 		c.Release(testCtx) // clean up goroutine
 	})
+}
+
+func TestTags_CallerReusesSlice(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	mClock := quartz.NewMock(t)
+
+	trapTags := []string{"foo"}
+	trap := mClock.Trap().Now(trapTags...)
+	defer trap.Close()
+	trapTags[0] = "reused"
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		callTags := []string{"foo"}
+		mClock.Now(callTags...)
+		callTags[0] = "reused"
+	}()
+
+	call := trap.MustWait(testCtx)
+	call.MustRelease(testCtx)
+	<-done
+	if want := []string{"foo"}; !slices.Equal(call.Tags, want) {
+		t.Fatalf("expected tags %v, got %v", want, call.Tags)
+	}
 }
 
 func Test_WithLogger(t *testing.T) {
