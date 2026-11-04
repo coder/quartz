@@ -965,15 +965,18 @@ func (c *mockCtx) cancelTree(err, cause error, stops *[]func() bool) {
 	for _, a := range afterFuncs {
 		a.f()
 	}
-	// A child that another goroutine is canceling, for example stdlib's AfterFunc goroutine for a
-	// layer that std just canceled, is pending: finished waits for it. Waiting here instead could
-	// deadlock, because reading a child's parent can cancel an ancestor whose tree this goroutine
-	// is already running.
+	// A child whose parent is canceled is part of this cancellation. If another goroutine is
+	// already canceling it, for example stdlib's AfterFunc goroutine for a layer that std just
+	// canceled, it is pending: finished waits for it. Waiting here instead could deadlock, because
+	// reading a child's parent can cancel an ancestor whose tree this goroutine is already running.
+	// A child behind a layer that does not cancel with c, such as context.WithoutCancel, is not
+	// part of it even when it is being canceled.
 	var pending []*mockCtx
 	for _, child := range children {
-		if child.parent.Err() != nil {
-			child.cancelTree(context.Canceled, nil, stops)
+		if child.parent.Err() == nil {
+			continue
 		}
+		child.cancelTree(context.Canceled, nil, stops)
 		if child.canceling() {
 			pending = append(pending, child)
 		}

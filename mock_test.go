@@ -631,6 +631,69 @@ func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
 	}
 }
 
+// blockingErrCtx is a layer whose Err blocks after a token is sent on arm: the next call closes
+// entered and returns only after release is closed, so a test can hold a cancellation in progress
+// where it reads the layer.
+type blockingErrCtx struct {
+	context.Context
+	arm     chan struct{}
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingErrCtx) Err() error {
+	select {
+	case <-p.arm:
+		close(p.entered)
+		<-p.release
+	default:
+	}
+	return p.Context.Err()
+}
+
+// A mock context behind context.WithoutCancel is not part of its ancestor's cancellation, so
+// canceling the ancestor does not wait for it, even while another goroutine is canceling it.
+func TestWithTimeout_CancelDoesNotWaitForDetachedContexts(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	root, cancelRoot := mClock.WithTimeout(context.Background(), time.Hour)
+	detached, cancelDetached := mClock.WithTimeout(context.WithoutCancel(root), time.Hour)
+	layer := &blockingErrCtx{
+		Context: detached,
+		arm:     make(chan struct{}, 1),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	_, cancelLast := mClock.WithTimeout(layer, time.Hour)
+	defer cancelLast()
+	kept, cancelKept := mClock.WithTimeout(context.WithoutCancel(root), time.Hour)
+	defer cancelKept()
+
+	// Hold the detached context's cancellation where it reads layer.
+	layer.arm <- struct{}{}
+	detachedDone := make(chan struct{})
+	go func() {
+		cancelDetached()
+		close(detachedDone)
+	}()
+	select {
+	case <-layer.entered:
+	case <-testCtx.Done():
+		t.Fatal("timed out waiting for the detached cancellation to read the layer")
+	}
+	// If cancelRoot waits for the detached cancellation, go test -timeout reports it by naming this
+	// test.
+	cancelRoot()
+	close(layer.release)
+	<-detachedDone
+	if err := kept.Err(); err != nil {
+		t.Fatalf("expected the other context behind WithoutCancel to stay live, got %v", err)
+	}
+}
+
 func TestWithDeadline_Deadline(t *testing.T) {
 	t.Parallel()
 
