@@ -711,8 +711,8 @@ func (c *Call) Release(ctx context.Context) error {
 	c.trap.callReleased()
 	c.apiCall.releases.Done()
 	if expired != nil {
-		return fmt.Errorf("context already expired when Release was called; the call was "+
-			"released: %w", expired)
+		return fmt.Errorf("context already expired when Release was called; this trap released "+
+			"the call: %w", expired)
 	}
 	select {
 	case <-ctx.Done():

@@ -391,8 +391,8 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 		// want must be in the error.
 		want string
 	}{
-		{name: "OneTrap", traps: 1, want: "already expired when Release was called"},
-		{name: "TwoTraps", traps: 2, want: "already expired when Release was called"},
+		{name: "OneTrap", traps: 1, want: "already expired when Release was called; this trap released"},
+		{name: "TwoTraps", traps: 2, want: "already expired when Release was called; this trap released"},
 		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, want: "2 traps"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -435,7 +435,7 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Release() = %q, want it to contain %q", err, tt.want)
 			}
-			if !tt.whileWaiting && strings.Contains(err.Error(), "trap") {
+			if !tt.whileWaiting && strings.Contains(err.Error(), "traps caught it") {
 				t.Fatalf("Release() = %q, want no mention of other traps", err)
 			}
 
