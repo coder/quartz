@@ -415,24 +415,61 @@ func Test_MultipleTrapsDeadlock(t *testing.T) {
 	}
 }
 
+// Test_UnreleasedCalls verifies that Close fails the test only when a trapped call has not been
+// released.
 func Test_UnreleasedCalls(t *testing.T) {
 	t.Parallel()
-	tRunFail(t, func(t testing.TB) {
-		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer testCancel()
-		mClock := quartz.NewMock(t)
 
+	t.Run("NotReleased", func(t *testing.T) {
+		t.Parallel()
+		tRunFail(t, func(t testing.TB) {
+			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer testCancel()
+			mClock := quartz.NewMock(t)
+
+			trap := mClock.Trap().Now()
+			defer trap.Close()
+
+			go func() {
+				_ = mClock.Now()
+			}()
+
+			c := trap.MustWait(testCtx) // missing release
+			trap.Close()                // detect unreleased call and fail
+
+			c.Release(testCtx) // clean up goroutine
+		})
+	})
+
+	// The call returns before Release, running on another goroutine, returns. Close right after
+	// the call returns must see it as released.
+	t.Run("ReleasedOnAnotherGoroutine", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		tb := &captureFailTB{TB: t}
+		mClock := quartz.NewMock(tb)
 		trap := mClock.Trap().Now()
-		defer trap.Close()
-
+		returned := make(chan struct{})
 		go func() {
-			_ = mClock.Now()
+			defer close(returned)
+			mClock.Now()
 		}()
-
-		c := trap.MustWait(testCtx) // missing release
-		trap.Close()                // detect unreleased call and fail
-
-		c.Release(testCtx) // clean up goroutine
+		c, err := trap.Wait(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		released := make(chan error, 1)
+		go func() { released <- c.Release(ctx) }()
+		<-returned
+		trap.Close()
+		if err := <-released; err != nil {
+			t.Fatal(err)
+		}
+		if tb.failed {
+			t.Fatal("Close() reported a failure after the released call returned")
+		}
 	})
 }
 

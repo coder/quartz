@@ -695,9 +695,10 @@ type Call struct {
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
 func (c *Call) Release(ctx context.Context) error {
-	c.apiCall.releases.Done()
-	// The call is released now, whether or not it completes before ctx expires.
+	// Count the call as released before letting it return: once releases.Done runs, the code under
+	// test can return and the test can call Trap.Close, which must see the release.
 	c.trap.callReleased()
+	c.apiCall.releases.Done()
 	select {
 	case <-ctx.Done():
 		// Unlike the waits, Release reports completion even if ctx has also expired: the release
