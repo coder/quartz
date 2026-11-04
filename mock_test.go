@@ -1289,9 +1289,9 @@ func TestMock_FailureNamesBlockingEvents(t *testing.T) {
 				t.Cleanup(cancel)
 			},
 			move: func(mClock *quartz.Mock) { mClock.Set(mClock.Now().Add(time.Hour)) },
-			want: "cannot Set time to 2024-01-01 01:00:00 +0000 UTC which is beyond next event at " +
-				"2024-01-01 00:00:30 +0000 UTC: timer from NewTimer(..., []), " +
-				"mock context from WithDeadline(..., [a])",
+			want: "cannot Set time to 2024-01-01 01:00:00 +0000 UTC " +
+				"which is beyond next event at 2024-01-01 00:00:30 +0000 UTC: " +
+				"timer from NewTimer(..., []), mock context from WithDeadline(..., [a])",
 		},
 		"SetBackward": {
 			schedule: func(t *testing.T, mClock *quartz.Mock, tags []string) {
