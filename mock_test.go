@@ -1024,6 +1024,50 @@ func TestWithTimeout_PastDeadline(t *testing.T) {
 	}
 }
 
+// At test end, a live mock context is canceled before the cleanups registered before it run, and a
+// context that was done earlier keeps its error and cause.
+func TestWithTimeout_TestEndCancelsBeforeEarlierCleanups(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	var live, canceled, expired context.Context
+	// Registered before the contexts are created, like t.Cleanup(srv.Close) for a server whose
+	// goroutines block on a mock context, so it must see them already done.
+	t.Cleanup(func() {
+		if !errors.Is(live.Err(), context.Canceled) {
+			t.Errorf("expected live context Canceled, got %v", live.Err())
+		}
+		if !errors.Is(context.Cause(live), quartz.ErrMockClockTestEnded) {
+			t.Errorf("expected live context cause ErrMockClockTestEnded, got %v",
+				context.Cause(live))
+		}
+		// Contexts that were done before the test ended keep their error and cause.
+		if !errors.Is(canceled.Err(), context.Canceled) {
+			t.Errorf("expected canceled context Canceled, got %v", canceled.Err())
+		}
+		if !errors.Is(context.Cause(canceled), context.Canceled) {
+			t.Errorf("expected canceled context cause Canceled, got %v", context.Cause(canceled))
+		}
+		if !errors.Is(expired.Err(), context.DeadlineExceeded) {
+			t.Errorf("expected expired context DeadlineExceeded, got %v", expired.Err())
+		}
+		if !errors.Is(context.Cause(expired), context.DeadlineExceeded) {
+			t.Errorf("expected expired context cause DeadlineExceeded, got %v",
+				context.Cause(expired))
+		}
+	})
+
+	// The cancel function is not called, so the context is live when the test ends.
+	live, _ = mClock.WithTimeout(context.Background(), time.Hour)
+	var cancel context.CancelFunc
+	canceled, cancel = mClock.WithTimeout(context.Background(), time.Hour)
+	cancel()
+	expired, _ = mClock.WithTimeout(context.Background(), time.Minute)
+	mClock.Advance(time.Minute).MustWait(testCtx)
+}
+
 // A context created after the cleanup registered by NewMock has run might never be canceled by a
 // cleanup, so it must be done when it is returned.
 func TestWithTimeout_CreatedAfterMockCleanup(t *testing.T) {
@@ -1206,48 +1250,6 @@ func TestWithTimeout_Trap(t *testing.T) {
 	case <-testCtx.Done():
 		t.Fatal("timeout waiting for canceled WithTimeoutCause ctx")
 	}
-}
-
-func TestWithTimeout_TestEndCancelsLiveContexts(t *testing.T) {
-	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-
-	mClock := quartz.NewMock(t)
-	var live, canceled, expired context.Context
-	// Registered before the contexts are created, like t.Cleanup(srv.Close) for a server whose
-	// goroutines block on a mock context, so it must see them already done.
-	t.Cleanup(func() {
-		if !errors.Is(live.Err(), context.Canceled) {
-			t.Errorf("expected live context Canceled, got %v", live.Err())
-		}
-		if !errors.Is(context.Cause(live), quartz.ErrMockClockTestEnded) {
-			t.Errorf("expected live context cause ErrMockClockTestEnded, got %v",
-				context.Cause(live))
-		}
-		// Contexts that were done before the test ended keep their error and cause.
-		if !errors.Is(canceled.Err(), context.Canceled) {
-			t.Errorf("expected canceled context Canceled, got %v", canceled.Err())
-		}
-		if !errors.Is(context.Cause(canceled), context.Canceled) {
-			t.Errorf("expected canceled context cause Canceled, got %v", context.Cause(canceled))
-		}
-		if !errors.Is(expired.Err(), context.DeadlineExceeded) {
-			t.Errorf("expected expired context DeadlineExceeded, got %v", expired.Err())
-		}
-		if !errors.Is(context.Cause(expired), context.DeadlineExceeded) {
-			t.Errorf("expected expired context cause DeadlineExceeded, got %v",
-				context.Cause(expired))
-		}
-	})
-
-	// The cancel function is not called, so the context is live when the test ends.
-	live, _ = mClock.WithTimeout(context.Background(), time.Hour)
-	var cancel context.CancelFunc
-	canceled, cancel = mClock.WithTimeout(context.Background(), time.Hour)
-	cancel()
-	expired, _ = mClock.WithTimeout(context.Background(), time.Minute)
-	mClock.Advance(time.Minute).MustWait(testCtx)
 }
 
 func Test_MultipleTraps(t *testing.T) {
