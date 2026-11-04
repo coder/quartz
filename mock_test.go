@@ -542,7 +542,7 @@ func TestTimer_StopAndReset(t *testing.T) {
 		return tmr, tmr.C
 	}
 	// AfterFunc(0) runs f from a new goroutine. Stop usually gets the Mock's lock before it: the
-	// goroutine got it first in 19 of 32000 runs with -race and in none without.
+	// goroutine gets it first in a few in ten thousand runs with -race.
 	zeroAfterFunc := func(_ context.Context, m *quartz.Mock) (*quartz.Timer, <-chan time.Time) {
 		ran := make(chan time.Time, 1)
 		return m.AfterFunc(0, func() { ran <- time.Time{} }), ran
