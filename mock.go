@@ -25,13 +25,12 @@ type TestingT interface {
 
 // ErrMockClockTestEnded is the context.Cause of a mock context that was still live when the
 // TestingT passed to NewMock ran its cleanups; its Err is context.Canceled. Each context is
-// canceled by a cleanup that it registers on that TestingT when it is created. Cleanups run last
-// registered first, so cleanups registered on that TestingT after the context see it live, and
-// cleanups registered before it see it canceled, unless they were already running when it was
-// created. A subtest's cleanups run before its parent's, so when the TestingT passed to NewMock is
-// the parent, the subtest's cleanups see the context live. A context created after the cleanup
-// registered by NewMock has run, in a cleanup registered before NewMock or by a goroutine that
-// outlived the test, is returned already canceled with this cause.
+// canceled in a cleanup that it registers on that TestingT when it is created. Cleanups run last
+// registered first, so cleanups registered before the context see it canceled, unless they were
+// already running when it was created, and cleanups registered after it see it live. A subtest's
+// cleanups run before its parent's, so they see the context live when that TestingT is the
+// parent's. A context created after the cleanup registered by NewMock has run is returned already
+// canceled with this cause.
 var ErrMockClockTestEnded = errors.New("quartz: mock clock test ended")
 
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
