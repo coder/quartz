@@ -832,10 +832,8 @@ func TestTrapWait_ExpiredContext(t *testing.T) {
 		mClock := quartz.NewMock(t)
 		trap := mClock.Trap().Now()
 		defer trap.Close()
-		// The context is live when Wait is called, so Wait blocks until it expires. The result is
-		// the same if it expires before Wait checks it.
-		waitCtx, cancelWait := context.WithTimeout(ctx, 10*time.Millisecond)
-		defer cancelWait()
+		// The context is live when Wait checks it on entry and expires once Wait waits.
+		waitCtx := newExpiresOnWaitCtx(t)
 		errs := make(chan error, 1)
 		go func() {
 			_, err := trap.Wait(waitCtx)
@@ -843,8 +841,8 @@ func TestTrapWait_ExpiredContext(t *testing.T) {
 		}()
 		select {
 		case err := <-errs:
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
 			}
 		case <-ctx.Done():
 			t.Fatal("Wait() did not return after the context expired")
