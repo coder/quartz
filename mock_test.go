@@ -636,30 +636,46 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 	}
 }
 
-// TestTrapWait_ExpiredContextNoCall verifies that Wait returns the context error, without blocking,
-// when the context has expired and no call has been trapped.
-func TestTrapWait_ExpiredContextNoCall(t *testing.T) {
+// TestTrapWait_ExpiredContext verifies that Wait returns the context error, without blocking, when
+// the context has expired, even if the trap is closed.
+func TestTrapWait_ExpiredContext(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	expired, cancelExpired := context.WithCancel(context.Background())
-	cancelExpired()
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	mClock := quartz.NewMock(t)
-	trap := mClock.Trap().Now()
-	defer trap.Close()
-	errs := make(chan error, 1)
-	go func() {
-		_, err := trap.Wait(expired)
-		errs <- err
-	}()
-	select {
-	case err := <-errs:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
-		}
-	case <-ctx.Done():
-		t.Fatal("Wait() did not return after the context expired")
+	for _, tt := range []struct {
+		name   string
+		closed bool
+	}{
+		{name: "NoCall"},
+		{name: "TrapClosed", closed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			mClock := quartz.NewMock(t)
+			trap := mClock.Trap().Now()
+			if tt.closed {
+				trap.Close()
+			} else {
+				defer trap.Close()
+			}
+			errs := make(chan error, 1)
+			go func() {
+				_, err := trap.Wait(expired)
+				errs <- err
+			}()
+			select {
+			case err := <-errs:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+				}
+			case <-ctx.Done():
+				t.Fatal("Wait() did not return after the context expired")
+			}
+		})
 	}
 }
 

@@ -809,33 +809,35 @@ func (t *Trap) callReleased() {
 
 var ErrTrapClosed = errors.New("trap closed")
 
-// Wait for a call to be trapped, or until the context expires or the trap is closed.
+// Wait for a call to be trapped, or until the context expires or the trap is closed. If the
+// context has already expired, Wait returns its error and leaves any trapped call for the next
+// Wait.
 func (t *Trap) Wait(ctx context.Context) (*Call, error) {
-	var a *apiCall
+	// select picks a random ready case, so check ctx first to make an expired context fail the same
+	// way whether or not a call is ready or the trap is closed. A call received below must be
+	// returned: the code under test stays blocked until the call is released.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case <-ctx.Done():
-		// select picks randomly among ready cases; report a ready call if there is one.
-		select {
-		case a = <-t.calls:
-		default:
-			return nil, ctx.Err()
-		}
+		return nil, ctx.Err()
 	case <-t.done:
 		return nil, ErrTrapClosed
-	case a = <-t.calls:
+	case a := <-t.calls:
+		c := &Call{
+			Time:     a.Time,
+			Duration: a.Duration,
+			Tags:     a.Tags,
+			apiCall:  a,
+			trap:     t,
+			tb:       t.mock.tb,
+		}
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		t.unreleasedCalls++
+		return c, nil
 	}
-	c := &Call{
-		Time:     a.Time,
-		Duration: a.Duration,
-		Tags:     a.Tags,
-		apiCall:  a,
-		trap:     t,
-		tb:       t.mock.tb,
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.unreleasedCalls++
-	return c, nil
 }
 
 // MustWait calls Wait() and then if there is an error, immediately fails the
