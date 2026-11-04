@@ -489,10 +489,10 @@ func (m *Mock) WithLogger(l Logger) *Mock {
 // You may re-set the time earlier than this, but only before timers or tickers
 // are created.
 //
-// A timer value or tick that has not been received when the cleanup registered by NewMock runs is
-// dropped. After that cleanup, a timer from NewTimer or a ticker from NewTicker that fires, also
-// after Reset, sends only to a reader already waiting on C. Call NewMock before registering
-// cleanups that wait for code reading the Mock's timers or tickers.
+// Call NewMock before registering cleanups that wait for code reading the Mock's timers or
+// tickers: NewMock's cleanup drops any timer value or tick that has not been received. After that
+// cleanup, a timer from NewTimer or a ticker from NewTicker sends only to a reader already waiting
+// on C.
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {
