@@ -514,45 +514,64 @@ func (l *testLogger) Logf(format string, args ...any) {
 	l.calls = append(l.calls, fmt.Sprintf(format, args...))
 }
 
-func TestTimerStop_Go123(t *testing.T) {
+// TestTimer_StopAndReset checks what Stop and Reset return for a timer that has fired, and that
+// no value is received after they return, as with a time.Timer.
+func TestTimer_StopAndReset(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	mClock := quartz.NewMock(t)
-
-	tmr := mClock.NewTimer(1 * time.Second)
-	mClock.Advance(1 * time.Second).MustWait(ctx)
-	if tmr.Stop() {
-		t.Fatal("timer hadn't already been active")
+	fired := func(ctx context.Context, m *quartz.Mock) *quartz.Timer {
+		tmr := m.NewTimer(time.Second)
+		m.Advance(time.Second).MustWait(ctx)
+		return tmr
 	}
-
-	select {
-	case tme := <-tmr.C:
-		t.Fatalf("got channel read after stop: %s", tme)
-	default:
-		// OK!
+	firedAndReceived := func(ctx context.Context, m *quartz.Mock) *quartz.Timer {
+		tmr := fired(ctx, m)
+		<-tmr.C
+		return tmr
 	}
-}
-
-func TestTimerReset_Go123(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	mClock := quartz.NewMock(t)
-
-	tmr := mClock.NewTimer(1 * time.Second)
-	mClock.Advance(1 * time.Second).MustWait(ctx)
-	if tmr.Reset(1 * time.Second) {
-		t.Fatal("timer hadn't already been active")
+	stop := func(tmr *quartz.Timer) bool { return tmr.Stop() }
+	reset := func(tmr *quartz.Timer) bool { return tmr.Reset(time.Hour) }
+	// stopAndDrain is the way to stop a timer before Go 1.23. It returns false if the receive
+	// blocks, which bubble time reports at once.
+	stopAndDrain := func(tmr *quartz.Timer) bool {
+		if !tmr.Stop() {
+			select {
+			case <-tmr.C:
+			case <-time.After(time.Second):
+				return false
+			}
+		}
+		return true
 	}
+	for _, tc := range []struct {
+		name  string
+		start func(context.Context, *quartz.Mock) *quartz.Timer
+		call  func(*quartz.Timer) bool
+		want  bool
+	}{
+		{name: "StopFiredUnread", start: fired, call: stop, want: true},
+		{name: "StopFiredReceived", start: firedAndReceived, call: stop, want: false},
+		{name: "ResetFiredUnread", start: fired, call: reset, want: true},
+		{name: "StopAndDrainFiredUnread", start: fired, call: stopAndDrain, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-	select {
-	case tme := <-tmr.C:
-		t.Fatalf("got channel read after stop: %s", tme)
-	default:
-		// OK!
+				tmr := tc.start(ctx, quartz.NewMock(t))
+				if got := tc.call(tmr); got != tc.want {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+				// Lets any goroutine that could still send on C run before the check.
+				synctest.Wait()
+				select {
+				case tme := <-tmr.C:
+					t.Errorf("received %s after the call returned", tme)
+				default:
+				}
+			})
+		})
 	}
 }
 

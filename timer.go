@@ -84,14 +84,18 @@ func (t *Timer) fire(tt time.Time) {
 	}
 }
 
-// endWriteLocked ends the goroutine that fire started to send on C, if it has not ended yet.
-func (t *Timer) endWriteLocked() {
+// endWriteLocked ends the goroutine that fire started to send on C, if it has not ended yet. It
+// reports whether that goroutine ended without sending the value.
+func (t *Timer) endWriteLocked() bool {
 	if t.interrupt == nil {
-		return
+		return false
 	}
-	<-t.interrupt
+	// The goroutine sends on interrupt when it ends without sending the value, and closes
+	// interrupt once it has sent the value.
+	_, unsent := <-t.interrupt
 	t.interrupt = nil
 	delete(t.mock.writes, t)
+	return unsent
 }
 
 func (t *Timer) next() time.Time {
@@ -99,8 +103,9 @@ func (t *Timer) next() time.Time {
 }
 
 // Stop prevents the Timer from firing. It returns true if the call stops the timer, false if the
-// timer has already expired or been stopped. Stop does not close the channel, to prevent a read
-// from the channel succeeding incorrectly.
+// timer has already expired or been stopped. As with a time.Timer, a timer whose value has not been
+// received has not expired: Stop discards the value and returns true. Stop does not close the
+// channel, to prevent a read from the channel succeeding incorrectly.
 //
 // See https://pkg.go.dev/time#Timer.Stop for more information.
 func (t *Timer) Stop(tags ...string) bool {
@@ -114,13 +119,15 @@ func (t *Timer) Stop(tags ...string) bool {
 	defer close(c.complete)
 	result := !t.stopped
 	t.mock.removeTimerLocked(t)
-	// check if we've already fired, and if so, interrupt it.
-	t.endWriteLocked()
+	if t.endWriteLocked() {
+		result = true
+	}
 	return result
 }
 
 // Reset changes the timer to expire after duration d. It returns true if the timer had been active,
-// false if the timer had expired or been stopped.
+// false if the timer had expired or been stopped. As with a time.Timer, a timer whose value has not
+// been received is active: Reset discards the value and returns true.
 //
 // See https://pkg.go.dev/time#Timer.Reset for more information.
 func (t *Timer) Reset(d time.Duration, tags ...string) bool {
@@ -133,8 +140,9 @@ func (t *Timer) Reset(d time.Duration, tags ...string) bool {
 	t.mock.matchCallLocked(c)
 	defer close(c.complete)
 	result := !t.stopped
-	// check if we've already fired, and if so, interrupt it.
-	t.endWriteLocked()
+	if t.endWriteLocked() {
+		result = true
+	}
 	// Remove the timer from the mock's event list synchronously; otherwise the
 	// stale old schedule can cause e.g. Advance() to reject advancing past the
 	// old nxt, even though the timer has been reset.
