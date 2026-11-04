@@ -973,6 +973,7 @@ func (c *mockCtx) cancelTree(err, cause error, stops *[]func() bool) {
 	// part of it even when it is being canceled.
 	var pending []*mockCtx
 	for _, child := range children {
+		// As in the context package, Err of the layers between c and child must not block.
 		if child.parent.Err() == nil {
 			continue
 		}
