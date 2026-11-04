@@ -29,17 +29,20 @@ func TestTrapWait_CallReadyWithExpiredContext(t *testing.T) {
 		done:  make(chan struct{}),
 	}
 	want := newCall(clockFunctionNow, nil)
-	trap.calls <- want
-
-	if _, err := trap.Wait(expired); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Wait() error = %v, want %v", err, context.Canceled)
-	}
-	c, err := trap.Wait(ctx)
-	if err != nil {
-		t.Fatalf("second Wait() error = %v, want nil", err)
-	}
-	if c.apiCall != want {
-		t.Fatal("second Wait() returned a different call than the ready one")
+	// A Wait that picks at random between the ready call and ctx.Done fails only half the
+	// iterations, so repeat.
+	for range 100 {
+		trap.calls <- want
+		if _, err := trap.Wait(expired); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() error = %v, want %v", err, context.Canceled)
+		}
+		c, err := trap.Wait(ctx)
+		if err != nil {
+			t.Fatalf("second Wait() error = %v, want nil", err)
+		}
+		if c.apiCall != want {
+			t.Fatal("second Wait() returned a different call than the ready one")
+		}
 	}
 }
 
@@ -62,26 +65,30 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			a := newCall(clockFunctionNow, nil)
-			a.traps = 1
-			a.releases.Add(1)
-			if tt.completed {
-				close(a.complete)
-			}
-			c := &Call{tb: t, apiCall: a, trap: &Trap{unreleasedCalls: 1}}
-
-			err := c.Release(expired)
-			if tt.completed {
-				if err != nil {
-					t.Fatalf("Release() = %v, want nil", err)
+			// A Release that picks at random between completion and ctx.Done fails only half the
+			// iterations, so repeat.
+			for range 100 {
+				a := newCall(clockFunctionNow, nil)
+				a.traps = 1
+				a.releases.Add(1)
+				if tt.completed {
+					close(a.complete)
 				}
-				return
-			}
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("Release() = %v, want %v", err, context.Canceled)
-			}
-			if strings.Contains(err.Error(), "trap") {
-				t.Fatalf("Release() = %q, want no mention of other traps", err)
+				c := &Call{tb: t, apiCall: a, trap: &Trap{unreleasedCalls: 1}}
+
+				err := c.Release(expired)
+				if tt.completed {
+					if err != nil {
+						t.Fatalf("Release() = %v, want nil", err)
+					}
+					continue
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Release() = %v, want %v", err, context.Canceled)
+				}
+				if strings.Contains(err.Error(), "trap") {
+					t.Fatalf("Release() = %q, want no mention of other traps", err)
+				}
 			}
 		})
 	}

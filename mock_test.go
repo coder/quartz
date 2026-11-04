@@ -673,23 +673,27 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 			defer cancel()
 
 			mClock := quartz.NewMock(t)
-			release := make(chan struct{})
-			if tt.pending {
-				mClock.AfterFunc(time.Second, func() { <-release })
-			}
-			w := mClock.Advance(time.Second)
-			errs := make(chan error, 1)
-			go func() { errs <- w.Wait(expired) }()
-			select {
-			case err := <-errs:
-				close(release)
-				w.MustWait(ctx)
-				if !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
+			// A Wait that picks at random between completion and ctx.Done fails only half the
+			// iterations, so repeat.
+			for range 100 {
+				release := make(chan struct{})
+				if tt.pending {
+					mClock.AfterFunc(time.Second, func() { <-release })
 				}
-			case <-ctx.Done():
-				close(release)
-				t.Fatal("Wait() did not return after the context expired")
+				w := mClock.Advance(time.Second)
+				errs := make(chan error, 1)
+				go func() { errs <- w.Wait(expired) }()
+				select {
+				case err := <-errs:
+					close(release)
+					w.MustWait(ctx)
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("Wait() = %v, want %v", err, context.DeadlineExceeded)
+					}
+				case <-ctx.Done():
+					close(release)
+					t.Fatal("Wait() did not return after the context expired")
+				}
 			}
 		})
 	}
@@ -721,18 +725,22 @@ func TestTrapWait_ExpiredContext(t *testing.T) {
 			} else {
 				defer trap.Close()
 			}
-			errs := make(chan error, 1)
-			go func() {
-				_, err := trap.Wait(expired)
-				errs <- err
-			}()
-			select {
-			case err := <-errs:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+			// A Wait that picks at random between the closed trap and ctx.Done fails only half the
+			// iterations, so repeat.
+			for range 100 {
+				errs := make(chan error, 1)
+				go func() {
+					_, err := trap.Wait(expired)
+					errs <- err
+				}()
+				select {
+				case err := <-errs:
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("Wait() = %v, want %v", err, context.Canceled)
+					}
+				case <-ctx.Done():
+					t.Fatal("Wait() did not return after the context expired")
 				}
-			case <-ctx.Done():
-				t.Fatal("Wait() did not return after the context expired")
 			}
 		})
 	}
