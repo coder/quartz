@@ -222,51 +222,56 @@ func TestPeek(t *testing.T) {
 // function callback is in progress.
 func TestTickerFunc_ContextDoneDuringTick(t *testing.T) {
 	t.Parallel()
-	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer testCancel()
-	mClock := quartz.NewMock(t)
+	synctest.Test(t, func(t *testing.T) {
+		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer testCancel()
+		mClock := quartz.NewMock(t)
 
-	tickStart := make(chan struct{})
-	tickDone := make(chan struct{})
-	ctx, cancel := context.WithCancel(testCtx)
-	defer cancel()
-	tkr := mClock.TickerFunc(ctx, time.Second, func() error {
-		close(tickStart)
+		tickStart := make(chan struct{})
+		tickDone := make(chan struct{})
+		ctx, cancel := context.WithCancel(testCtx)
+		defer cancel()
+		tkr := mClock.TickerFunc(ctx, time.Second, func() error {
+			close(tickStart)
+			select {
+			case <-tickDone:
+			case <-testCtx.Done():
+				t.Error("timeout waiting for tickDone")
+			}
+			return nil
+		})
+		w := mClock.Advance(time.Second)
 		select {
-		case <-tickDone:
+		case <-tickStart:
+			// OK
 		case <-testCtx.Done():
-			t.Error("timeout waiting for tickDone")
+			t.Fatal("timeout waiting for tickStart")
 		}
-		return nil
+		waitErr := make(chan error, 1)
+		go func() {
+			waitErr <- tkr.Wait()
+		}()
+		cancel()
+		// Once every goroutine in the bubble is blocked, Wait has either returned or is waiting
+		// for the callback.
+		synctest.Wait()
+		select {
+		case <-waitErr:
+			t.Fatal("wait should not return while tick callback in progress")
+		default:
+			// OK
+		}
+		close(tickDone)
+		select {
+		case err := <-waitErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatal("expected context.Canceled error")
+			}
+		case <-testCtx.Done():
+			t.Fatal("timed out waiting for wait to finish")
+		}
+		w.MustWait(testCtx)
 	})
-	w := mClock.Advance(time.Second)
-	select {
-	case <-tickStart:
-		// OK
-	case <-testCtx.Done():
-		t.Fatal("timeout waiting for tickStart")
-	}
-	waitErr := make(chan error, 1)
-	go func() {
-		waitErr <- tkr.Wait()
-	}()
-	cancel()
-	select {
-	case <-waitErr:
-		t.Fatal("wait should not return while tick callback in progress")
-	case <-time.After(time.Millisecond * 100):
-		// OK
-	}
-	close(tickDone)
-	select {
-	case err := <-waitErr:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatal("expected context.Canceled error")
-		}
-	case <-testCtx.Done():
-		t.Fatal("timed out waiting for wait to finish")
-	}
-	w.MustWait(testCtx)
 }
 
 // TestTickerFunc_LongCallback tests that we don't call the ticker func a second time while the
@@ -597,28 +602,37 @@ func TestTimerReset_NegativeDuration(t *testing.T) {
 // server in such a cleanup rely on this when a worker reads the timer on its way out.
 func TestTimer_ReadableDuringCleanup(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	mClock := quartz.NewMock(t)
-	busy := make(chan struct{})
-	exited := make(chan struct{})
-	// Stands in for a server's Close: it unblocks the worker and waits for it to exit.
-	t.Cleanup(func() {
-		close(busy)
-		select {
-		case <-exited:
-		case <-time.After(10 * time.Second):
-			t.Error("worker did not receive the timer value during cleanup")
-		}
+		mClock := quartz.NewMock(t)
+		busy := make(chan struct{})
+		quit := make(chan struct{})
+		exited := make(chan struct{})
+		// Stands in for a server's Close: it unblocks the worker and waits for it to exit. Bubble
+		// time moves once every goroutine is blocked, so a worker that never receives fails the
+		// test at once. quit then lets the worker exit, so the bubble can end.
+		t.Cleanup(func() {
+			close(busy)
+			select {
+			case <-exited:
+			case <-time.After(10 * time.Second):
+				t.Error("worker did not receive the timer value during cleanup")
+			}
+			close(quit)
+		})
+		tmr := mClock.NewTimer(time.Second)
+		go func() {
+			defer close(exited)
+			<-busy
+			select {
+			case <-tmr.C:
+			case <-quit:
+			}
+		}()
+		mClock.Advance(time.Second).MustWait(ctx)
 	})
-	tmr := mClock.NewTimer(time.Second)
-	go func() {
-		defer close(exited)
-		<-busy
-		<-tmr.C
-	}()
-	mClock.Advance(time.Second).MustWait(ctx)
 }
 
 // TestTimer_ReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup
