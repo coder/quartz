@@ -689,27 +689,31 @@ func TestTimer_ReadableDuringCleanup(t *testing.T) {
 	})
 }
 
-// TestTimer_ReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup
-// runs receives the value of a timer that fires just before or after that cleanup. synctest.Wait
-// makes sure the reader is waiting before the timer fires and that the send has ended before the
-// check.
-func TestTimer_ReaderWaitingAtMockCleanup(t *testing.T) {
+// TestReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup runs
+// receives a timer value or tick sent just before that cleanup, or a timer value sent after it. A
+// ticker sends no ticks after the cleanup. synctest.Wait makes sure the reader is waiting before
+// the clock fires and that the send has ended before the check.
+func TestReaderWaitingAtMockCleanup(t *testing.T) {
 	t.Parallel()
+	newTimer := func(m *quartz.Mock) <-chan time.Time { return m.NewTimer(time.Second).C }
+	newTicker := func(m *quartz.Mock) <-chan time.Time { return m.NewTicker(time.Second).C }
 	for _, tc := range []struct {
 		name             string
+		start            func(*quartz.Mock) <-chan time.Time
 		fireAfterCleanup bool
 	}{
-		// The test fires the timer as its last step. In a bubble, the goroutine that sends the
-		// value often starts only after NewMock's cleanup is waiting to end it.
-		{name: "FiredBeforeCleanup"},
-		{name: "FiredAfterCleanup", fireAfterCleanup: true},
+		// These rows fire as the test's last step. In a bubble, the goroutine that sends on C
+		// often reaches its send only after NewMock's cleanup is waiting to end it.
+		{name: "TimerFiredBeforeCleanup", start: newTimer},
+		{name: "TickerFiredBeforeCleanup", start: newTicker},
+		{name: "TimerFiredAfterCleanup", start: newTimer, fireAfterCleanup: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			// When the sending goroutine starts late, select picks at random between the reader
-			// and the cleanup, so a send that does not try the reader first loses the value about
-			// half the time. Each round is a new bubble, so without the race detector, which
-			// changes scheduling, the test then fails in nearly every run.
+			// When it does, select picks at random between the reader and the cleanup, so a send
+			// that does not try the reader first loses the value about half the time. Each round
+			// is a new bubble, so without the race detector, which changes scheduling, the test
+			// then fails in nearly every run.
 			for range 10 {
 				synctest.Test(t, func(t *testing.T) {
 					var mClock *quartz.Mock
@@ -723,14 +727,14 @@ func TestTimer_ReaderWaitingAtMockCleanup(t *testing.T) {
 						synctest.Wait()
 						close(quit)
 						if len(received) == 0 {
-							t.Error("the waiting reader did not receive the timer value")
+							t.Error("the waiting reader did not receive the value")
 						}
 					})
 					mClock = quartz.NewMock(t)
-					tmr := mClock.NewTimer(time.Second)
+					c := tc.start(mClock)
 					go func() {
 						select {
-						case <-tmr.C:
+						case <-c:
 							received <- struct{}{}
 						case <-quit:
 						}
