@@ -366,8 +366,7 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 
 	mClock := quartz.NewMock(t)
 	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
-	child, childCancel := context.WithCancel(ctx)
-	defer childCancel()
+	derived := stdlibDescendants(t, ctx)
 	nested, nestedCancel := mClock.WithTimeout(ctx, time.Hour)
 	defer nestedCancel()
 	// Obtained before cancel so the check below does not trigger the nested context's own parent
@@ -375,13 +374,91 @@ func TestWithTimeout_CancelCancelsDerived(t *testing.T) {
 	nestedDone := nested.Done()
 
 	cancel()
-	if !errors.Is(child.Err(), context.Canceled) {
-		t.Fatalf("expected stdlib child Canceled, got %v", child.Err())
+	for name, child := range derived {
+		if !errors.Is(child.Err(), context.Canceled) {
+			t.Errorf("%s: expected Canceled, got %v", name, child.Err())
+		}
+		if got := context.Cause(child); !errors.Is(got, context.Canceled) {
+			t.Errorf("%s: expected Canceled cause, got %v", name, got)
+		}
 	}
 	select {
 	case <-nestedDone:
 	default:
 		t.Fatal("expected nested mock context Done to be closed")
+	}
+}
+
+type ctxKey struct{}
+
+// embeddingCtx is a user-defined context that embeds its parent, as wrappers in logging and tracing
+// libraries do.
+type embeddingCtx struct{ context.Context }
+
+// stdlibDescendants returns contexts that context.WithCancel derives from ctx directly and through
+// layers that do not cancel. Stdlib cancels each of them before the call that cancels ctx returns.
+func stdlibDescendants(t *testing.T, ctx context.Context) map[string]context.Context {
+	derive := func(parent context.Context) context.Context {
+		child, cancel := context.WithCancel(parent)
+		t.Cleanup(cancel)
+		return child
+	}
+	return map[string]context.Context{
+		"Direct":    derive(ctx),
+		"WithValue": derive(context.WithValue(ctx, ctxKey{}, "v")),
+		"Embedding": derive(embeddingCtx{ctx}),
+	}
+}
+
+// stallingParent is a parent that is never canceled and whose AfterFunc stop function blocks until
+// release is closed. An expiring mock context calls that stop function after it is done and before
+// its derived contexts are, so a test can act in between.
+type stallingParent struct {
+	context.Context
+	stopping chan struct{}
+	release  chan struct{}
+}
+
+// Done is not nil, so contexts derived from p register through AfterFunc.
+func (*stallingParent) Done() <-chan struct{} { return make(chan struct{}) }
+
+func (p *stallingParent) AfterFunc(func()) func() bool {
+	return func() bool {
+		close(p.stopping)
+		<-p.release
+		return true
+	}
+}
+
+// Like stdlib's cancel, cancel returns after derived contexts are done, also when an expiry on
+// another goroutine has marked the context done and not yet reached them.
+func TestWithTimeout_CancelDuringExpiry(t *testing.T) {
+	t.Parallel()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+
+	mClock := quartz.NewMock(t)
+	parent := &stallingParent{
+		Context:  context.Background(),
+		stopping: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	ctx, cancel := mClock.WithTimeout(parent, time.Second)
+	child, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+
+	w := mClock.Advance(time.Second)
+	select {
+	case <-parent.stopping:
+	case <-testCtx.Done():
+		t.Fatal("timed out waiting for the expiry to stop the parent registration")
+	}
+	cancel()
+	err := child.Err()
+	close(parent.release)
+	w.MustWait(testCtx)
+	if err == nil {
+		t.Fatal("expected the derived context to be done when cancel returned")
 	}
 }
 
@@ -590,8 +667,7 @@ func TestWithTimeoutCause_Cause(t *testing.T) {
 	expectedErr := errors.New("deadline cause")
 	ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, expectedErr)
 	defer cancel()
-	child, childCancel := context.WithCancel(ctx)
-	defer childCancel()
+	derived := stdlibDescendants(t, ctx)
 
 	mClock.Advance(time.Second).MustWait(testCtx)
 
@@ -601,8 +677,13 @@ func TestWithTimeoutCause_Cause(t *testing.T) {
 	if !errors.Is(context.Cause(ctx), expectedErr) {
 		t.Fatalf("expected cause %v, got %v", expectedErr, context.Cause(ctx))
 	}
-	if !errors.Is(context.Cause(child), expectedErr) {
-		t.Fatalf("expected child cause %v, got %v", expectedErr, context.Cause(child))
+	for name, child := range derived {
+		if !errors.Is(child.Err(), context.DeadlineExceeded) {
+			t.Errorf("%s: expected DeadlineExceeded, got %v", name, child.Err())
+		}
+		if !errors.Is(context.Cause(child), expectedErr) {
+			t.Errorf("%s: expected cause %v, got %v", name, expectedErr, context.Cause(child))
+		}
 	}
 }
 

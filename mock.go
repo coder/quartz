@@ -213,9 +213,9 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 		c.cancel(context.DeadlineExceeded, cause)
 	}
 	var stop func() bool
-	if p, ok := parent.(*mockCtx); ok {
+	if p, ok := parent.(*mockCtxView); ok {
 		// Run synchronously when the parent is canceled, as stdlib children do.
-		stop = p.AfterFunc(c.checkParent)
+		stop = p.c.AfterFunc(c.checkParent)
 	} else {
 		stop = context.AfterFunc(parent, c.checkParent)
 	}
@@ -226,7 +226,14 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	if done {
 		stop()
 	}
-	return c, func() { c.cancel(context.Canceled, nil) }
+	std, stdCancel := context.WithCancel(c)
+	return &mockCtxView{std: std, c: c}, func() {
+		c.cancel(context.Canceled, nil)
+		// c.cancel has canceled std unless another goroutine canceled c first and has not reached
+		// std yet. stdCancel makes std and its descendants done before cancel returns, as stdlib's
+		// cancel does.
+		stdCancel()
+	}
 }
 
 // checkDoneContexts cancels contexts whose parents are done, so their pending events do not block
@@ -735,11 +742,10 @@ type afterFunc struct{ f func() }
 // while leaving expiry to Done() and Err(), which follow mock time.
 var noWallDeadline = time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
 
-// AfterFunc lets stdlib contexts created directly from c register for cancellation instead of each
-// starting a goroutine that waits on Done (see context.afterFuncer). Registered functions run
-// before the call that cancels c returns, so those contexts are done by the time cancel() or
-// Advance().MustWait() returns. Contexts derived through another layer, such as context.WithValue,
-// still use a goroutine because the context package does not forward AfterFunc.
+// AfterFunc lets the stdlib context behind c's mockCtxView, and mock contexts created from that
+// view, register for cancellation instead of each starting a goroutine that waits on Done (see
+// context.afterFuncer). Registered functions run before the call that cancels c returns, so those
+// contexts are done by the time cancel() or Advance().MustWait() returns.
 func (c *mockCtx) AfterFunc(f func()) (stop func() bool) {
 	c.mock.mu.Lock()
 	defer c.mock.mu.Unlock()
@@ -767,23 +773,64 @@ func (c *mockCtx) Deadline() (time.Time, bool) {
 	return c.wallDeadline, true
 }
 
+// mockCtxView is the context that WithDeadline, WithTimeout, and their Cause variants return. Its
+// Done, Err, and Value come from std, the context.WithCancel(c) that newMockCtx creates. std
+// registers with c through c.AfterFunc, so it is canceled with c's error and cause before the
+// call that cancels c returns. Stdlib finds std through Done and Value and attaches derived
+// contexts to it directly, also through layers that do not cancel, such as context.WithValue, so
+// they are done when std is.
+type mockCtxView struct {
+	std context.Context
+	c   *mockCtx
+}
+
+func (v *mockCtxView) Deadline() (time.Time, bool) {
+	return v.c.Deadline()
+}
+
 // Done, Err, and Value check the parent first because stdlib contexts are done as soon as their
 // parent is, but c may be notified from a goroutine: always when the parent is not a mock context,
 // and when a mock parent was canceled before c registered with it. Value is included because
 // context.Cause reads the cause through it. A Done channel obtained before the parent was canceled
 // closes when that goroutine runs.
+func (v *mockCtxView) Done() <-chan struct{} {
+	v.checkParent()
+	return v.std.Done()
+}
+
+func (v *mockCtxView) Value(key any) any {
+	v.checkParent()
+	return v.std.Value(key)
+}
+
+func (v *mockCtxView) Err() error {
+	v.checkParent()
+	return v.std.Err()
+}
+
+// checkParent cancels c if its parent is done, then waits for std if c is done. std is canceled
+// after c: by the goroutine that canceled c, or by a new goroutine if c was canceled while std was
+// registering with it. Without the wait, Err could return nil after the parent's cancel returned,
+// because c.checkParent returns at once while the parent's AfterFunc goroutine is canceling c.
+func (v *mockCtxView) checkParent() {
+	v.c.checkParent()
+	select {
+	case <-v.c.done:
+		<-v.std.Done()
+	default:
+	}
+}
+
+// Done, Err, and Value report c's own state without checking the parent; mockCtxView checks it.
 func (c *mockCtx) Done() <-chan struct{} {
-	c.checkParent()
 	return c.done
 }
 
 func (c *mockCtx) Value(key any) any {
-	c.checkParent()
 	return c.inner.Value(key)
 }
 
 func (c *mockCtx) Err() error {
-	c.checkParent()
 	c.mock.mu.Lock()
 	defer c.mock.mu.Unlock()
 	return c.err
