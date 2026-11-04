@@ -450,7 +450,7 @@ func descendants(
 // stallingParent is a parent whose Done never closes and whose AfterFunc stop function blocks until
 // release is closed. A mock context calls that stop function while it is being canceled, so a test
 // can act while another goroutine is canceling it. Canceling the embedded context makes Err and
-// Cause report the parent done without notifying the mock context.
+// Cause report the parent done, but p never calls the functions passed to its AfterFunc.
 type stallingParent struct {
 	context.Context
 	stopping chan struct{}
@@ -469,30 +469,40 @@ func (p *stallingParent) AfterFunc(func()) func() bool {
 }
 
 // When cancel is called while another goroutine is canceling the context and is blocked in the
-// parent, cancel does not wait for the parent, and the context and its derived contexts report that
-// goroutine's error and cause.
+// parent of the context or of a mock context derived from it, cancel does not wait for that parent,
+// and the context and its derived contexts report that goroutine's error and cause.
 func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 	t.Parallel()
 
 	deadlineCause := errors.New("deadline cause")
 	parentCause := errors.New("parent cause")
+	expire := func(testCtx context.Context, mClock *quartz.Mock,
+		_ context.CancelFunc, _ context.CancelCauseFunc,
+	) func() {
+		w := mClock.Advance(time.Second)
+		return func() { w.MustWait(testCtx) }
+	}
 	tests := map[string]struct {
 		// startCanceling starts canceling the context on another goroutine and returns a function
 		// that waits for that goroutine.
 		startCanceling func(testCtx context.Context, mClock *quartz.Mock,
 			cancel context.CancelFunc, cancelParent context.CancelCauseFunc) (wait func())
-		wantErr   error
-		wantCause error
+		// stallDescendant puts the stalling parent between the context and a mock context derived
+		// from it, so the cancellation blocks while it unregisters that mock context instead.
+		stallDescendant bool
+		wantErr         error
+		wantCause       error
 	}{
 		"Expiry": {
-			startCanceling: func(testCtx context.Context, mClock *quartz.Mock,
-				_ context.CancelFunc, _ context.CancelCauseFunc,
-			) func() {
-				w := mClock.Advance(time.Second)
-				return func() { w.MustWait(testCtx) }
-			},
-			wantErr:   context.DeadlineExceeded,
-			wantCause: deadlineCause,
+			startCanceling: expire,
+			wantErr:        context.DeadlineExceeded,
+			wantCause:      deadlineCause,
+		},
+		"ExpiryUnregisteringDescendant": {
+			startCanceling:  expire,
+			stallDescendant: true,
+			wantErr:         context.DeadlineExceeded,
+			wantCause:       deadlineCause,
 		},
 		// The first cancel finds the parent done and takes its error and cause.
 		"ParentCanceled": {
@@ -521,12 +531,26 @@ func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 			root, cancelRoot := context.WithCancelCause(context.Background())
 			defer cancelRoot(nil)
 			parent := &stallingParent{
-				Context:  root,
 				stopping: make(chan struct{}),
 				release:  make(chan struct{}),
 			}
-			ctx, cancel := mClock.WithTimeoutCause(parent, time.Second, deadlineCause)
-			child, childCancel := context.WithCancel(ctx)
+			release := sync.OnceFunc(func() { close(parent.release) })
+			// Without the release, a failure before it would leave the test's cleanup blocked.
+			defer release()
+			var ctx, derivedParent context.Context
+			var cancel context.CancelFunc
+			if tt.stallDescendant {
+				ctx, cancel = mClock.WithTimeoutCause(root, time.Second, deadlineCause)
+				parent.Context = ctx
+				nested, nestedCancel := mClock.WithTimeout(parent, time.Hour)
+				t.Cleanup(nestedCancel)
+				derivedParent = nested
+			} else {
+				parent.Context = root
+				ctx, cancel = mClock.WithTimeoutCause(parent, time.Second, deadlineCause)
+				derivedParent = ctx
+			}
+			child, childCancel := context.WithCancel(derivedParent)
 			defer childCancel()
 
 			wait := tt.startCanceling(testCtx, mClock, cancel, cancelRoot)
@@ -541,7 +565,7 @@ func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 			// Read while the other goroutine is still in the parent's stop function.
 			ctxErr, ctxCause := ctx.Err(), context.Cause(ctx)
 			childErr, childCause := child.Err(), context.Cause(child)
-			close(parent.release)
+			release()
 			wait()
 
 			if !errors.Is(ctxErr, tt.wantErr) || !errors.Is(ctxCause, tt.wantCause) {
@@ -556,49 +580,54 @@ func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 	}
 }
 
-// When cancel is called while an expiry is canceling the mock contexts created from the context,
-// cancel returns after they and their descendants are done, without waiting for the expiry to
-// unregister them from their parents, which can block.
-func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
+// When cancel or the expiry's MustWait returns, the mock contexts derived from the context and their
+// descendants are done, also those that another goroutine is still canceling.
+func TestWithTimeout_WaitsForMockContextsBeingCanceled(t *testing.T) {
 	t.Parallel()
 
-	// Each case derives contexts from ctx and returns them, a channel that closes while the expiry
-	// is still running, and an idempotent function that lets the expiry finish.
-	tests := map[string]func(t *testing.T, mClock *quartz.Mock, ctx context.Context) (
-		derived []context.Context, expiring <-chan struct{}, release func()){
+	tests := map[string]struct {
+		// layer returns the parent of one chain of mock contexts derived from ctx.
+		layer func(t *testing.T, ctx context.Context) context.Context
+		// expire advances the clock to ctx's deadline and returns the expiry's waiter once the call
+		// under test has returned.
+		expire func(t *testing.T, testCtx context.Context, mClock *quartz.Mock,
+			ctx context.Context, cancel context.CancelFunc) quartz.AdvanceWaiter
+	}{
 		// ctx.Done closes before the expiry cancels the mock contexts, and with many of them the
 		// expiry is still canceling when cancel is called.
-		"ManyMockContexts": func(t *testing.T, mClock *quartz.Mock, ctx context.Context) (
-			[]context.Context, <-chan struct{}, func(),
-		) {
-			var derived []context.Context
-			for range 200 {
-				nested, cancel := mClock.WithTimeout(ctx, time.Hour)
-				t.Cleanup(cancel)
-				child, childCancel := context.WithCancel(nested)
-				t.Cleanup(childCancel)
-				derived = append(derived, child)
-			}
-			return derived, ctx.Done(), func() {}
+		"Cancel": {
+			layer: func(_ *testing.T, ctx context.Context) context.Context { return ctx },
+			expire: func(t *testing.T, testCtx context.Context, mClock *quartz.Mock,
+				ctx context.Context, cancel context.CancelFunc,
+			) quartz.AdvanceWaiter {
+				w := mClock.Advance(time.Second)
+				select {
+				case <-ctx.Done():
+				case <-testCtx.Done():
+					t.Fatal("timed out waiting for the expiry")
+				}
+				cancel()
+				return w
+			},
 		},
-		// The expiry blocks while it unregisters the mock context from parent.
-		"BlockingUnregister": func(t *testing.T, mClock *quartz.Mock, ctx context.Context) (
-			[]context.Context, <-chan struct{}, func(),
-		) {
-			parent := &stallingParent{
-				Context:  ctx,
-				stopping: make(chan struct{}),
-				release:  make(chan struct{}),
-			}
-			nested, cancel := mClock.WithTimeout(parent, time.Hour)
-			t.Cleanup(cancel)
-			child, childCancel := context.WithCancel(nested)
-			t.Cleanup(childCancel)
-			release := sync.OnceFunc(func() { close(parent.release) })
-			return []context.Context{child}, parent.stopping, release
+		// The expiry cancels each layer, which starts a stdlib goroutine that cancels the chain
+		// derived from the layer, so the expiry finds some chains already being canceled.
+		"MustWait": {
+			layer: func(t *testing.T, ctx context.Context) context.Context {
+				layer, cancel := context.WithCancel(ctx)
+				t.Cleanup(cancel)
+				return layer
+			},
+			expire: func(_ *testing.T, testCtx context.Context, mClock *quartz.Mock,
+				_ context.Context, _ context.CancelFunc,
+			) quartz.AdvanceWaiter {
+				w := mClock.Advance(time.Second)
+				w.MustWait(testCtx)
+				return w
+			},
 		},
 	}
-	for name, derive := range tests {
+	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -607,19 +636,23 @@ func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
 			mClock := quartz.NewMock(t)
 			deadlineCause := errors.New("deadline cause")
 			ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, deadlineCause)
-			derived, expiring, release := derive(t, mClock, ctx)
-			// Without the release, a failure before it would leave the test's cleanup blocked.
-			defer release()
-
-			w := mClock.Advance(time.Second)
-			select {
-			case <-expiring:
-			case <-testCtx.Done():
-				t.Fatal("timed out waiting for the expiry")
+			defer cancel()
+			// The chains are long enough that the call under test usually returns while one is still
+			// being canceled if it does not wait for it.
+			var derived []context.Context
+			for range 20 {
+				parent := tt.layer(t, ctx)
+				for range 20 {
+					nested, nestedCancel := mClock.WithTimeout(parent, time.Hour)
+					t.Cleanup(nestedCancel)
+					parent = nested
+				}
+				child, childCancel := context.WithCancel(parent)
+				t.Cleanup(childCancel)
+				derived = append(derived, child)
 			}
-			// If cancel waits for the blocked expiry, go test -timeout reports it by naming this
-			// test.
-			cancel()
+
+			w := tt.expire(t, testCtx, mClock, ctx, cancel)
 			var live int
 			for _, c := range derived {
 				err, cause := c.Err(), context.Cause(c)
@@ -627,11 +660,10 @@ func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
 					live++
 				}
 			}
-			release()
 			w.MustWait(testCtx)
 			if live > 0 {
-				t.Fatalf("%d of %d derived contexts lacked DeadlineExceeded or the deadline cause "+
-					"when cancel returned", live, len(derived))
+				t.Fatalf("%d of %d derived contexts lacked DeadlineExceeded or the deadline cause",
+					live, len(derived))
 			}
 		})
 	}
