@@ -222,13 +222,22 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 		c.cancel(context.DeadlineExceeded, cause)
 	}
 	var stop func() bool
-	// Register with the nearest mock context, also behind layers that forward Done and Value such
-	// as context.WithValue, so c is canceled before that context's cancellation returns, as stdlib
-	// children are. A different Done channel means a layer between them can be canceled on its own,
-	// as in stdlib's parentCancelCtx, so c registers with parent instead.
-	if p, ok := parent.Value(mockCtxViewKey{}).(*mockCtxView); ok && parent.Done() == p.std.Done() {
+	// Register with the nearest mock context, also behind layers that forward Value such as
+	// context.WithValue, so c is canceled before that context's cancellation returns, as stdlib
+	// children are. When Done differs, a layer between them, such as context.WithCancel, can
+	// also be canceled on its own, as in stdlib's parentCancelCtx, so c registers with parent as
+	// well.
+	p, ok := parent.Value(mockCtxViewKey{}).(*mockCtxView)
+	switch {
+	case ok && parent.Done() == p.std.Done():
 		stop = p.c.registerChild(c)
-	} else {
+	case ok:
+		stopChild, stopAfterFunc := p.c.registerChild(c), context.AfterFunc(parent, c.checkParent)
+		stop = func() bool {
+			stopped := stopChild()
+			return stopAfterFunc() || stopped
+		}
+	default:
 		stop = context.AfterFunc(parent, c.checkParent)
 	}
 	c.mock.mu.Lock()
@@ -840,10 +849,12 @@ func (v *mockCtxView) Deadline() (time.Time, bool) {
 }
 
 // Done, Err, and Value check the parent first because stdlib contexts are done as soon as their
-// parent is, but c may be notified from a goroutine: always when the parent is not a mock context,
-// and when a mock parent was canceled before c registered with it. Value is included because
-// context.Cause reads the cause through it. A Done channel obtained before the parent was canceled
-// closes when that goroutine runs.
+// parent is, but c may learn of its parent's cancellation from a goroutine. Only the cancellation of
+// the mock context that c registered with reaches c on the canceling goroutine. A cancellation that
+// starts anywhere else, such as at a parent from the context package or at a layer between c and
+// that mock context, reaches c from a goroutine, as does one that happened before c registered.
+// Value is included because context.Cause reads the cause through it. A Done channel obtained
+// before the parent was canceled closes when that goroutine runs.
 func (v *mockCtxView) Done() <-chan struct{} {
 	v.checkParent()
 	return v.std.Done()
@@ -949,13 +960,15 @@ func (c *mockCtx) cancelTree(err, cause error, stops *[]func() bool) {
 	c.children = nil
 	c.mock.mu.Unlock()
 	// Without mock.mu: derived contexts call c.Err() while canceling. std goes first: children
-	// read c through its view, which waits for std.
+	// read c through its view, which waits for std, and a stdlib layer between c and a child is
+	// canceled through std.
 	for _, a := range afterFuncs {
 		a.f()
 	}
-	// A child that another goroutine is canceling, for example through its own cancel function, is
-	// pending: finished waits for it. Waiting here instead could deadlock, because reading a
-	// child's parent can cancel an ancestor whose tree this goroutine is already running.
+	// A child that another goroutine is canceling, for example stdlib's AfterFunc goroutine for a
+	// layer that std just canceled, is pending: finished waits for it. Waiting here instead could
+	// deadlock, because reading a child's parent can cancel an ancestor whose tree this goroutine
+	// is already running.
 	var pending []*mockCtx
 	for _, child := range children {
 		if child.parent.Err() != nil {

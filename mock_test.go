@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime/pprof"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -428,12 +429,13 @@ func descendants(t *testing.T, mClock *quartz.Mock, ctx context.Context) map[str
 		return withCancel(nested)
 	}
 	return map[string]context.Context{
-		"Direct":        withCancel(ctx),
-		"WithValue":     withCancel(context.WithValue(ctx, ctxKey{}, "v")),
-		"Embedding":     withCancel(embeddingCtx{ctx}),
-		"Mock":          throughMock(ctx),
-		"MockWithValue": throughMock(context.WithValue(ctx, ctxKey{}, "v")),
-		"MockEmbedding": throughMock(embeddingCtx{ctx}),
+		"Direct":               withCancel(ctx),
+		"WithValue":            withCancel(context.WithValue(ctx, ctxKey{}, "v")),
+		"Embedding":            withCancel(embeddingCtx{ctx}),
+		"Mock":                 throughMock(ctx),
+		"MockWithValue":        throughMock(context.WithValue(ctx, ctxKey{}, "v")),
+		"MockEmbedding":        throughMock(embeddingCtx{ctx}),
+		"MockBehindWithCancel": throughMock(withCancel(ctx)),
 	}
 }
 
@@ -547,12 +549,13 @@ func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 }
 
 // When cancel is called while an expiry is canceling the mock contexts created from the context,
-// cancel returns after they and their descendants are done.
+// cancel returns after they and their descendants are done, without waiting for the expiry to
+// unregister them from their parents, which can block.
 func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
 	t.Parallel()
 
 	// Each case derives contexts from ctx and returns them, a channel that closes while the expiry
-	// is still running, and a function that lets the expiry finish.
+	// is still running, and an idempotent function that lets the expiry finish.
 	tests := map[string]func(t *testing.T, mClock *quartz.Mock, ctx context.Context) (
 		derived []context.Context, expiring <-chan struct{}, release func()){
 		// ctx.Done closes before the expiry cancels the mock contexts, and with many of them the
@@ -570,6 +573,22 @@ func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
 			}
 			return derived, ctx.Done(), func() {}
 		},
+		// The expiry blocks while it unregisters the mock context from parent.
+		"BlockingUnregister": func(t *testing.T, mClock *quartz.Mock, ctx context.Context) (
+			[]context.Context, <-chan struct{}, func(),
+		) {
+			parent := &stallingParent{
+				Context:  ctx,
+				stopping: make(chan struct{}),
+				release:  make(chan struct{}),
+			}
+			nested, cancel := mClock.WithTimeout(parent, time.Hour)
+			t.Cleanup(cancel)
+			child, childCancel := context.WithCancel(nested)
+			t.Cleanup(childCancel)
+			release := sync.OnceFunc(func() { close(parent.release) })
+			return []context.Context{child}, parent.stopping, release
+		},
 	}
 	for name, derive := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -581,6 +600,8 @@ func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
 			deadlineCause := errors.New("deadline cause")
 			ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, deadlineCause)
 			derived, expiring, release := derive(t, mClock, ctx)
+			// Without the release, a failure before it would leave the test's cleanup blocked.
+			defer release()
 
 			w := mClock.Advance(time.Second)
 			select {
@@ -588,6 +609,8 @@ func TestWithTimeout_CancelDuringExpiryWaitsForMockContexts(t *testing.T) {
 			case <-testCtx.Done():
 				t.Fatal("timed out waiting for the expiry")
 			}
+			// If cancel waits for the blocked expiry, go test -timeout reports it by naming this
+			// test.
 			cancel()
 			var live int
 			for _, c := range derived {
@@ -742,7 +765,7 @@ func TestWithTimeout_ParentCanceledClosesDone(t *testing.T) {
 			return context.WithCancel(context.Background())
 		},
 		// The stdlib layer can be canceled without the mock context behind it, so the child must
-		// not register with that mock context.
+		// also register with the layer.
 		"WithCancelOfMock": func(t *testing.T, mClock *quartz.Mock) (context.Context, context.CancelFunc) {
 			mockParent, cancel := mClock.WithTimeout(context.Background(), time.Hour)
 			t.Cleanup(cancel)
