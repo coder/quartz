@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -331,14 +332,21 @@ func Test_MultipleTraps(t *testing.T) {
 	defer testCancel()
 	mClock := quartz.NewMock(t)
 
-	trap0 := mClock.Trap().Now("0")
+	// Reusing a tag slice after the call returns must not change the traps or the trapped calls.
+	trapTags := []string{"0"}
+	trap0 := mClock.Trap().Now(trapTags...)
 	defer trap0.Close()
-	trap1 := mClock.Trap().Now("1")
+	trapTags[0] = "1"
+	trap1 := mClock.Trap().Now(trapTags...)
 	defer trap1.Close()
+	trapTags[0] = "reused"
 
 	timeCh := make(chan time.Time)
 	go func() {
-		timeCh <- mClock.Now("0", "1")
+		callTags := []string{"0", "1"}
+		now := mClock.Now(callTags...)
+		callTags[0], callTags[1] = "reused", "reused"
+		timeCh <- now
 	}()
 
 	c0 := trap0.MustWait(testCtx)
@@ -369,6 +377,12 @@ func Test_MultipleTraps(t *testing.T) {
 		}
 	case <-testCtx.Done():
 		t.Fatal("timed out waiting for Now()")
+	}
+
+	for _, c := range []*quartz.Call{c0, c1} {
+		if want := []string{"0", "1"}; !slices.Equal(c.Tags, want) {
+			t.Fatalf("expected tags %v, got %v", want, c.Tags)
+		}
 	}
 }
 

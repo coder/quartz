@@ -454,9 +454,10 @@ func (m *Mock) newTrap(fn clockFunction, tags []string) *Trap {
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - Trap %s(..., %v)", fn, tags)
 	}
+	// Copy tags because the caller may reuse its slice while the trap still matches calls.
 	tr := &Trap{
 		fn:    fn,
-		tags:  tags,
+		tags:  slices.Clone(tags),
 		mock:  m,
 		calls: make(chan *apiCall),
 		done:  make(chan struct{}),
@@ -728,9 +729,11 @@ func withDuration(d time.Duration) callArg {
 }
 
 func newCall(fn clockFunction, tags []string, args ...callArg) *apiCall {
+	// Copy tags because the caller may reuse its slice after the call returns, while a trapped call
+	// still exposes them as Call.Tags.
 	c := &apiCall{
 		fn:       fn,
-		Tags:     tags,
+		Tags:     slices.Clone(tags),
 		complete: make(chan struct{}),
 	}
 	for _, a := range args {
