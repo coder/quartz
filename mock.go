@@ -251,10 +251,10 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	return &mockCtxView{std: std, c: c}, func() {
 		c.cancel(context.Canceled, nil)
 		// If another goroutine canceled c first, it may still be canceling std and the mock
-		// contexts registered with c. Wait for that, as a stdlib cancel that loses a race does. The
-		// wait runs no function that unregisters a context from its parent, which can block in user
-		// code: cancel calls those after closing finished. stdCancel is then a no-op, called
-		// because WithCancel requires it.
+		// contexts registered with c. Wait for that, as a stdlib cancel that loses a race does.
+		// finished does not wait for the functions that unregister those contexts from their
+		// parents, which can block in user code. stdCancel is then a no-op, called because
+		// WithCancel requires it.
 		<-c.finished
 		<-std.Done()
 		stdCancel()
@@ -743,8 +743,8 @@ type mockCtx struct {
 	// wallDeadline is what Deadline() reports; see noWallDeadline.
 	wallDeadline time.Time
 	// children holds the mock contexts registered through registerChild and is guarded by
-	// mock.mu. finished is closed once c and every mock context canceled with it are canceled,
-	// before cancel unregisters them from their parents.
+	// mock.mu. finished is closed once c and every mock context canceled with it are canceled. It
+	// does not wait for cancel to unregister them from their parents.
 	children []*mockCtx
 	finished chan struct{}
 
@@ -876,9 +876,10 @@ func (v *mockCtxView) Err() error {
 }
 
 // checkParent cancels c if its parent is done, then waits for std if c is done. std is canceled
-// after c: by the goroutine that canceled c, or by a new goroutine if c was canceled while std was
-// registering with it. Without the wait, Err could return nil after the parent's cancel returned,
-// because c.checkParent returns at once while the parent's AfterFunc goroutine is canceling c.
+// after c: by the goroutine that canceled c, or by a goroutine that c.AfterFunc starts if c was
+// canceled after context.WithCancel found c's Done open but before it called c.AfterFunc. Without
+// the wait, Err could return nil after the parent's cancel returned, because c.checkParent returns
+// at once while the parent's AfterFunc goroutine is canceling c.
 func (v *mockCtxView) checkParent() {
 	v.c.checkParent()
 	select {
