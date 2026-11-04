@@ -813,49 +813,55 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 	t.Parallel()
 
 	// Each subtest observes the parent's cancellation through one path only, because every path
-	// also cancels the mock context and would hide a gap in the others.
-	observe := map[string]func(t *testing.T, mClock *quartz.Mock, ctx context.Context){
-		"Err": func(t *testing.T, _ *quartz.Mock, ctx context.Context) {
-			if !errors.Is(ctx.Err(), context.Canceled) {
-				t.Fatalf("expected Canceled, got %v", ctx.Err())
+	// also cancels the mock contexts and would hide a gap in the others.
+	observe := map[string]func(t *testing.T, mClock *quartz.Mock, ctxs []context.Context){
+		"Err": func(t *testing.T, _ *quartz.Mock, ctxs []context.Context) {
+			for i, ctx := range ctxs {
+				if !errors.Is(ctx.Err(), context.Canceled) {
+					t.Fatalf("context %d: expected Canceled, got %v", i, ctx.Err())
+				}
 			}
 		},
-		"Done": func(t *testing.T, _ *quartz.Mock, ctx context.Context) {
-			select {
-			case <-ctx.Done():
-			default:
-				t.Fatal("expected Done to be closed")
+		"Done": func(t *testing.T, _ *quartz.Mock, ctxs []context.Context) {
+			for i, ctx := range ctxs {
+				select {
+				case <-ctx.Done():
+				default:
+					t.Fatalf("context %d: expected Done to be closed", i)
+				}
 			}
 		},
-		"Cause": func(t *testing.T, _ *quartz.Mock, ctx context.Context) {
-			if got := context.Cause(ctx); !errors.Is(got, context.Canceled) {
-				t.Fatalf("expected Canceled cause, got %v", got)
+		"Cause": func(t *testing.T, _ *quartz.Mock, ctxs []context.Context) {
+			for i, ctx := range ctxs {
+				if got := context.Cause(ctx); !errors.Is(got, context.Canceled) {
+					t.Fatalf("context %d: expected Canceled cause, got %v", i, got)
+				}
 			}
 		},
-		"Peek": func(t *testing.T, mClock *quartz.Mock, _ context.Context) {
+		"Peek": func(t *testing.T, mClock *quartz.Mock, _ []context.Context) {
 			if d, ok := mClock.Peek(); ok {
 				t.Fatalf("expected no pending events, got Peek()=%s", d)
 			}
 		},
-		"Advance": func(t *testing.T, mClock *quartz.Mock, _ context.Context) {
-			// The canceled context must not block advancing past its old deadline.
+		"Advance": func(t *testing.T, mClock *quartz.Mock, _ []context.Context) {
+			// The canceled contexts must not block advancing past their old deadline.
 			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer testCancel()
 			mClock.Advance(2 * time.Hour).MustWait(testCtx)
 		},
-		"Set": func(t *testing.T, mClock *quartz.Mock, _ context.Context) {
+		"Set": func(t *testing.T, mClock *quartz.Mock, _ []context.Context) {
 			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer testCancel()
 			mClock.Set(mClock.Now().Add(2 * time.Hour)).MustWait(testCtx)
 		},
-		"AdvanceNext": func(t *testing.T, mClock *quartz.Mock, _ context.Context) {
+		"AdvanceNext": func(t *testing.T, mClock *quartz.Mock, _ []context.Context) {
 			testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer testCancel()
 			mClock.NewTimer(2 * time.Hour) // AdvanceNext fails the test when nothing is scheduled.
 			d, w := mClock.AdvanceNext()
 			w.MustWait(testCtx)
 			if d != 2*time.Hour {
-				t.Fatalf("expected AdvanceNext to skip the canceled context, advanced %s", d)
+				t.Fatalf("expected AdvanceNext to skip the canceled contexts, advanced %s", d)
 			}
 		},
 	}
@@ -864,12 +870,18 @@ func TestWithTimeout_ParentCanceled(t *testing.T) {
 			t.Parallel()
 			mClock := quartz.NewMock(t)
 			parent, parentCancel := context.WithCancel(context.Background())
-			ctx, cancel := mClock.WithTimeout(parent, time.Hour)
-			defer cancel()
+			// The parent's cancel starts a goroutine for each mock context, so with many of them the
+			// observer reads some while their goroutine is still canceling them.
+			var ctxs []context.Context
+			for range 200 {
+				ctx, cancel := mClock.WithTimeout(parent, time.Hour)
+				t.Cleanup(cancel)
+				ctxs = append(ctxs, ctx)
+			}
 
 			// As with stdlib contexts, the cancellation is visible as soon as parentCancel returns.
 			parentCancel()
-			fn(t, mClock, ctx)
+			fn(t, mClock, ctxs)
 		})
 	}
 }
