@@ -450,8 +450,8 @@ whose fake clock moves forward when every goroutine in the bubble is
   outside a bubble, as in [Mocking](#mocking). Bubble time stops while a goroutine waits on I/O, so
   a timeout does not stop a slow query or request. With `go 1.27` or later in `go.mod`, HTTP tests
   can stay in the bubble with an `httptest.NewTestServer` created there and its `Client()`.
-- If you need traps or want to decide when time moves, use a `*Mock`, in a bubble or not. It
-  ignores bubble time; only `Advance()`, `AdvanceNext()`, and `Set()` move it.
+- If you want to decide when time moves, or need traps, use a `*Mock`. It ignores bubble time; only
+  `Advance()`, `AdvanceNext()`, and `Set()` move it.
 
 ```go
 func TestTimeout(t *testing.T) {
@@ -478,6 +478,9 @@ Inside a bubble:
 - Create a `*Mock` with the `t` that `synctest.Test` passes in. Cleanup on the outer test's `t` runs
   outside the bubble and can crash the test binary with a fatal error such as
   `close of synctest channel from outside bubble`.
+- With a `*Mock`, `synctest.Wait()` replaces traps that only wait for code to reach a clock call. It
+  returns once every other goroutine in the bubble is durably blocked, for example on the timer it
+  just created, so a following `Advance()` fires that timer.
 - Test timeouts created in a bubble, such as the `ctx` you pass to `MustWait`, run on bubble time.
   Make them longer than the bubble time that passes while they are in use: a 10-second `ctx` expires
   during a `time.Sleep(time.Minute)`. A long timeout costs no wall time: when every goroutine in the
