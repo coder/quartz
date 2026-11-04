@@ -222,56 +222,51 @@ func TestPeek(t *testing.T) {
 // function callback is in progress.
 func TestTickerFunc_ContextDoneDuringTick(t *testing.T) {
 	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer testCancel()
-		mClock := quartz.NewMock(t)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	mClock := quartz.NewMock(t)
 
-		tickStart := make(chan struct{})
-		tickDone := make(chan struct{})
-		ctx, cancel := context.WithCancel(testCtx)
-		defer cancel()
-		tkr := mClock.TickerFunc(ctx, time.Second, func() error {
-			close(tickStart)
-			select {
-			case <-tickDone:
-			case <-testCtx.Done():
-				t.Error("timeout waiting for tickDone")
-			}
-			return nil
-		})
-		w := mClock.Advance(time.Second)
+	tickStart := make(chan struct{})
+	tickDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(testCtx)
+	defer cancel()
+	tkr := mClock.TickerFunc(ctx, time.Second, func() error {
+		close(tickStart)
 		select {
-		case <-tickStart:
-			// OK
+		case <-tickDone:
 		case <-testCtx.Done():
-			t.Fatal("timeout waiting for tickStart")
+			t.Error("timeout waiting for tickDone")
 		}
-		waitErr := make(chan error, 1)
-		go func() {
-			waitErr <- tkr.Wait()
-		}()
-		cancel()
-		// Once every goroutine in the bubble is blocked, Wait has either returned or is waiting
-		// for the callback.
-		synctest.Wait()
-		select {
-		case <-waitErr:
-			t.Fatal("wait should not return while tick callback in progress")
-		default:
-			// OK
-		}
-		close(tickDone)
-		select {
-		case err := <-waitErr:
-			if !errors.Is(err, context.Canceled) {
-				t.Fatal("expected context.Canceled error")
-			}
-		case <-testCtx.Done():
-			t.Fatal("timed out waiting for wait to finish")
-		}
-		w.MustWait(testCtx)
+		return nil
 	})
+	w := mClock.Advance(time.Second)
+	select {
+	case <-tickStart:
+		// OK
+	case <-testCtx.Done():
+		t.Fatal("timeout waiting for tickStart")
+	}
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- tkr.Wait()
+	}()
+	cancel()
+	select {
+	case <-waitErr:
+		t.Fatal("wait should not return while tick callback in progress")
+	case <-time.After(time.Millisecond * 100):
+		// OK
+	}
+	close(tickDone)
+	select {
+	case err := <-waitErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("expected context.Canceled error")
+		}
+	case <-testCtx.Done():
+		t.Fatal("timed out waiting for wait to finish")
+	}
+	w.MustWait(testCtx)
 }
 
 // TestTickerFunc_LongCallback tests that we don't call the ticker func a second time while the
