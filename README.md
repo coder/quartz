@@ -437,6 +437,56 @@ func (c *Component) Method() {
 This makes it much less likely that code changes that introduce new components or methods will spoil
 existing unit tests.
 
+## Quartz and `testing/synctest`
+
+With `go 1.25` or later in `go.mod`, [`synctest.Test`](https://pkg.go.dev/testing/synctest) runs a
+test in a "bubble" whose fake clock moves forward when every goroutine in the bubble is [durably
+blocked](https://pkg.go.dev/testing/synctest#hdr-Blocking). To test time-dependent code:
+
+- If the test does no real I/O, run it in `synctest.Test` and keep the production
+  `quartz.NewReal()`. Inside a bubble it runs on bubble time, so you need no `*Mock`, `Advance()`,
+  or traps.
+- If the test does real I/O, such as database queries or real network requests, use a `*Mock`
+  outside a bubble, as in [Mocking](#mocking). While a goroutine waits on I/O, bubble time does not
+  move and `synctest.Wait()` does not return, so a timeout does not stop a slow query or request.
+  With `go 1.27` or later in `go.mod`, HTTP tests can stay in the bubble with an
+  `httptest.NewTestServer` created there and its `Client()`.
+- If you want to decide when time moves, or need traps, use a `*Mock`, inside or outside a bubble.
+  It ignores bubble time; only `Advance()`, `AdvanceNext()`, and `Set()` move it.
+
+```go
+func TestTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clk := quartz.NewReal()
+		ctx, cancel := clk.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		time.Sleep(time.Minute) // moves bubble time; no wall-clock wait
+		synctest.Wait()         // let the context's timer callback mark ctx done
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatal("expected deadline exceeded")
+		}
+	})
+}
+```
+
+Inside a bubble:
+
+- Do not create an `httptest.NewServer` or leave open a connection that a goroutine reads from, such
+  as an HTTP client's idle keep-alive connection. That goroutine waits on the network, which stops
+  bubble time and `synctest.Wait()` as described above, so the test hangs at its next `time.Sleep`,
+  timeout, or `synctest.Wait()`, and `synctest.Test` does not return until that goroutine exits.
+- Create a `*Mock` with the `t` that `synctest.Test` passes in. Cleanup on the outer test's `t` runs
+  outside the bubble and can crash the test binary with a fatal error about a
+  `synctest channel from outside bubble`.
+- With a `*Mock`, `synctest.Wait()` can replace a trap whose only job is to wait until the code has
+  made a clock call, such as `NewTimer`, if the code makes that call before it first blocks. If the
+  code blocks first, for example on a channel or in `time.Sleep`, `synctest.Wait()` returns before
+  the call and a following `Advance()` misses the timer; keep the trap.
+- Test timeouts created in a bubble, such as the `ctx` you pass to `MustWait`, run on bubble time.
+  Make them longer than the bubble time that passes while they are in use: a 10-second `ctx` expires
+  during a `time.Sleep(time.Minute)`. A long timeout costs no wall time: when every goroutine in the
+  bubble is durably blocked, bubble time jumps to the earliest pending timer.
+
 ## Why another time testing library?
 
 Writing good unit tests for components and functions that use the `time` package is difficult, even
