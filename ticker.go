@@ -41,6 +41,13 @@ func (t *Ticker) fire(tt time.Time) {
 	t.mock.recomputeNextLocked()
 	if t.interrupt != nil { // implies runLoop is still going.
 		t.internalTicks <- tt
+		return
+	}
+	// NewMock's cleanup has stopped runLoop, so only a reader that is already waiting gets the
+	// tick.
+	select {
+	case t.c <- tt:
+	default:
 	}
 }
 
@@ -128,7 +135,7 @@ func (t *Ticker) startRunLoopLocked() {
 	if t.interrupt != nil {
 		t.mock.tb.Error("called startRunLoopLocked when interrupt suggests we are already running")
 	}
-	// NewMock's cleanup has run and would not stop the runLoop, so the ticker sends no ticks.
+	// NewMock's cleanup has run and would not stop the runLoop, so fire sends to C itself.
 	if t.mock.testOver {
 		return
 	}

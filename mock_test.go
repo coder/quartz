@@ -705,9 +705,8 @@ func TestReadableDuringCleanup(t *testing.T) {
 }
 
 // TestReaderWaitingAtMockCleanup checks that a reader waiting on C when NewMock's cleanup runs
-// receives a timer value or tick sent just before that cleanup, or a timer value sent after it. A
-// ticker sends no ticks after the cleanup. synctest.Wait makes sure the reader is waiting before
-// the clock fires and that the send has ended before the check.
+// receives a timer value or tick sent just before or after that cleanup. synctest.Wait makes sure
+// the reader is waiting before the clock fires and that the send has ended before the check.
 func TestReaderWaitingAtMockCleanup(t *testing.T) {
 	t.Parallel()
 	newTimer := func(m *quartz.Mock) <-chan time.Time { return m.NewTimer(time.Second).C }
@@ -722,6 +721,7 @@ func TestReaderWaitingAtMockCleanup(t *testing.T) {
 		{name: "TimerFiredBeforeCleanup", start: newTimer},
 		{name: "TickerFiredBeforeCleanup", start: newTicker},
 		{name: "TimerFiredAfterCleanup", start: newTimer, fireAfterCleanup: true},
+		{name: "TickerFiredAfterCleanup", start: newTicker, fireAfterCleanup: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
