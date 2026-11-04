@@ -595,8 +595,8 @@ func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 	}
 }
 
-// When cancel or the expiry's MustWait returns, the mock contexts derived from the context and their
-// descendants are done, also those that another goroutine is still canceling.
+// When cancel or the expiry's MustWait returns, the mock contexts derived from the context and
+// their descendants are done, also those that another goroutine is still canceling.
 func TestWithTimeout_WaitsForMockContextsBeingCanceled(t *testing.T) {
 	t.Parallel()
 
@@ -652,8 +652,8 @@ func TestWithTimeout_WaitsForMockContextsBeingCanceled(t *testing.T) {
 			deadlineCause := errors.New("deadline cause")
 			ctx, cancel := mClock.WithTimeoutCause(context.Background(), time.Second, deadlineCause)
 			defer cancel()
-			// The chains are long enough that the call under test usually returns while one is still
-			// being canceled if it does not wait for it.
+			// The chains are long enough that the call under test usually returns while one is
+			// still being canceled if it does not wait for it.
 			var derived []context.Context
 			for range 20 {
 				parent := tt.layer(t, ctx)
