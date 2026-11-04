@@ -251,15 +251,13 @@ func (w AdvanceWaiter) Wait(ctx context.Context) error {
 // running the test or benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
 	w.tb.Helper()
-	err := w.Wait(ctx)
-	if err == nil {
+	// Decide from ctx on entry, not from whether the advance completed: it can complete just after
+	// ctx expires during the wait, or still be pending when ctx had expired before the call.
+	if err := ctx.Err(); err != nil {
+		w.tb.Fatalf("context already expired when MustWait was called: %s", err)
 		return
 	}
-	select {
-	case <-w.ch:
-		w.tb.Fatalf("context expired, although the clock advance completed; was the context "+
-			"already expired when MustWait was called?: %s", err)
-	default:
+	if err := w.Wait(ctx); err != nil {
 		w.tb.Fatalf("context expired while waiting for clock to advance: %s", err)
 	}
 }

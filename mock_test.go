@@ -611,8 +611,8 @@ func tRunFail(t testing.TB, f func(t testing.TB)) {
 }
 
 // expiresOnWaitCtx is a context that is live until its Done channel is first requested, and then
-// expires. Release and Trap.Wait check ctx.Err() on entry and call Done only to wait, so it stands
-// in for a context that expires while they wait, without depending on timing.
+// expires. Release, Trap.Wait and MustWait check ctx.Err() on entry and call Done only to wait, so
+// it stands in for a context that expires while they wait, without depending on timing.
 type expiresOnWaitCtx struct {
 	context.Context
 	cancel context.CancelFunc
@@ -627,6 +627,19 @@ func newExpiresOnWaitCtx(t testing.TB) expiresOnWaitCtx {
 func (c expiresOnWaitCtx) Done() <-chan struct{} {
 	c.cancel()
 	return c.Context.Done()
+}
+
+// wantMessages fails the test unless got has one message per want, each containing its want.
+func wantMessages(t testing.TB, got []string, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("failures = %q, want %d containing %q", got, len(want), want)
+	}
+	for i := range want {
+		if !strings.Contains(got[i], want[i]) {
+			t.Fatalf("failure %d = %q, want it to contain %q", i, got[i], want[i])
+		}
+	}
 }
 
 type testLogger struct {
@@ -747,10 +760,9 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 		}
 
 		mClock.Advance(time.Second).MustWait(expired)
-		const want = "although the clock advance completed"
-		if len(tb.messages) != 1 || !strings.Contains(tb.messages[0], want) {
-			t.Fatalf("MustWait() failures = %q, want one containing %q", tb.messages, want)
-		}
+		mClock.Advance(time.Second).MustWait(newExpiresOnWaitCtx(t))
+		wantMessages(t, tb.messages, "already expired when MustWait was called",
+			"while waiting for clock to advance")
 	})
 
 	t.Run("Pending", func(t *testing.T) {
@@ -765,9 +777,11 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 		mClock.AfterFunc(time.Second, func() { <-release })
 		w := mClock.Advance(time.Second)
 		errs := make(chan error, 1)
+		expiresOnWait := newExpiresOnWaitCtx(t)
 		go func() {
 			err := w.Wait(expired)
 			w.MustWait(expired)
+			w.MustWait(expiresOnWait)
 			errs <- err
 		}()
 		select {
@@ -780,10 +794,8 @@ func TestAdvanceWaiter_ExpiredContext(t *testing.T) {
 			close(release)
 			t.Fatal("Wait() or MustWait() did not return after the context expired")
 		}
-		const want = "while waiting for clock to advance"
-		if len(tb.messages) != 1 || !strings.Contains(tb.messages[0], want) {
-			t.Fatalf("MustWait() failures = %q, want one containing %q", tb.messages, want)
-		}
+		wantMessages(t, tb.messages, "already expired when MustWait was called",
+			"while waiting for clock to advance")
 		if err := w.Wait(ctx); err != nil {
 			t.Fatal(err)
 		}
