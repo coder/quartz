@@ -458,8 +458,9 @@ func (p *stallingParent) AfterFunc(func()) func() bool {
 	}
 }
 
-// When cancel is called while another goroutine is canceling the context, cancel returns after
-// derived contexts are done, and they report that goroutine's error and cause, as with stdlib.
+// When cancel is called while another goroutine is canceling the context and is blocked in the
+// parent, cancel does not wait for the parent, and the context and its derived contexts report that
+// goroutine's error and cause.
 func TestWithTimeout_CancelWhileCanceling(t *testing.T) {
 	t.Parallel()
 

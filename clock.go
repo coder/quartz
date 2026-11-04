@@ -37,16 +37,22 @@ type Clock interface {
 	Until(t time.Time, tags ...string) time.Duration
 
 	// WithDeadline returns a copy of parent that expires when this Clock reaches d. When it
-	// expires, Err satisfies errors.Is(err, context.DeadlineExceeded). Parent cancellation
-	// propagates with stdlib semantics. Parent deadlines are not converted to mock time, so a
-	// parent created with context.WithDeadline or context.WithTimeout can cancel the child
-	// independently of this Clock. The returned cancel function is idempotent and must be called.
+	// expires, Err satisfies errors.Is(err, context.DeadlineExceeded). Parent deadlines are not
+	// converted to mock time, so a parent created with context.WithDeadline or context.WithTimeout
+	// can cancel the child independently of this Clock. The returned cancel function is idempotent
+	// and must be called.
 	//
 	// With a Mock clock, Done and Err follow mock time, but ctx.Deadline() reports the parent's
 	// deadline, or a time in year 9999 if the parent has none. Libraries such as net.Dialer,
 	// http.Client, and gRPC compare Deadline() with wall time and would treat a mock deadline as
 	// already expired. Code that needs the remaining mock time must compute it from the deadline or
 	// timeout it passed in, not from ctx.Deadline().
+	//
+	// With a Mock clock, the context and contexts derived from it are done when the cancel function
+	// returns, or when Advance(...).MustWait() returns after the clock reached d. When a parent
+	// from the context package is canceled, Err reports it at once, but contexts derived from the
+	// returned context are canceled a moment later on another goroutine, and a Done channel
+	// obtained before closes only then; wait on Done instead of checking Err.
 	WithDeadline(parent context.Context, d time.Time, tags ...string) (context.Context, context.CancelFunc)
 
 	// WithDeadlineCause is like WithDeadline and records cause when this Clock reaches d.

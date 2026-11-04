@@ -328,9 +328,17 @@ if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 }
 ```
 
-Parent contexts keep standard `context` behavior. A parent created with `context.WithDeadline` or
-`context.WithTimeout` can still cancel the child on wall time because Quartz does not convert parent
-deadlines to mock time.
+A canceled parent cancels the child. A parent created with `context.WithDeadline` or
+`context.WithTimeout` can still cancel the child on wall time because Quartz does not convert
+parent deadlines to mock time.
+
+When `cancel()` returns, or `Advance(...).MustWait()` returns after the clock reaches the deadline,
+the context and contexts derived from it are done, so the test can check them right away. When a
+parent from the `context` package is canceled, `ctx.Err()` reports it at once, but contexts derived
+from `ctx` are canceled a moment later on another goroutine, and a `ctx.Done()` channel obtained
+before closes only then; wait on `Done()` instead of checking `Err()`. Contexts that are still live
+when the test ends are canceled with cause `quartz.ErrMockClockTestEnded`, and contexts created
+after the test ended are returned already canceled with that cause.
 
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.

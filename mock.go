@@ -23,10 +23,11 @@ type TestingT interface {
 	Cleanup(func())
 }
 
-// ErrMockClockTestEnded is used as the cancellation cause when test cleanup cancels a context that
-// was not canceled by its caller. A context created after the cleanup registered by NewMock has
-// run, including in a cleanup registered before NewMock, is returned already canceled with this
-// cause.
+// ErrMockClockTestEnded is the context.Cause of a mock context that was still live when the test
+// ended; its Err is context.Canceled. Each context is canceled by a cleanup registered when the
+// context was created, so it is still live in cleanups registered after that, which run first. A
+// context created after the cleanup registered by NewMock has run, in a cleanup registered before
+// NewMock or by a goroutine that outlived the test, is returned already canceled with this cause.
 var ErrMockClockTestEnded = errors.New("quartz: mock clock test ended")
 
 // Mock is the testing implementation of Clock.  It tracks a time that monotonically increases
@@ -204,8 +205,8 @@ func (m *Mock) newMockCtx(parent context.Context, call *apiCall, cause error, de
 	m.matchCallLocked(call)
 	c.deadline = deadlineLocked()
 	pastDeadline := !c.deadline.After(m.cur)
-	// Once the cleanup registered by NewMock has run, the Mock is finished, and the cleanup below
-	// may never run.
+	// After the cleanup registered by NewMock has run, the cleanup below runs only after the
+	// caller's cleanup returns, or never if the test has finished, so cancel the context now.
 	testOver := m.testOver
 	if !pastDeadline {
 		m.addEventLocked(c)
