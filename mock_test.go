@@ -725,10 +725,11 @@ func TestReaderWaitingAtMockCleanup(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			// When it does, select picks at random between the reader and the cleanup, so a send
-			// that does not try the reader first loses the value about half the time. Each round
-			// is a new bubble, so without the race detector, which changes scheduling, the test
-			// then fails in nearly every run.
+			// A send that reaches its select after NewMock's cleanup is waiting to end it finds the
+			// reader and the cleanup both ready, and select picks between them at random. A send
+			// that does not try the reader first then loses the value about half the time. Each
+			// round is a new bubble, so without the race detector, which changes scheduling, the
+			// test then fails in nearly every run.
 			for range 10 {
 				synctest.Test(t, func(t *testing.T) {
 					var mClock *quartz.Mock
