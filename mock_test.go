@@ -515,7 +515,7 @@ func (l *testLogger) Logf(format string, args ...any) {
 }
 
 // TestTimer_StopAndReset checks what Stop and Reset return for a timer that has fired, and that
-// no value is received after they return, as with a time.Timer.
+// no value is received after they return and Reset's schedule stays, as with a time.Timer.
 func TestTimer_StopAndReset(t *testing.T) {
 	t.Parallel()
 	fired := func(ctx context.Context, m *quartz.Mock) *quartz.Timer {
@@ -528,6 +528,8 @@ func TestTimer_StopAndReset(t *testing.T) {
 		<-tmr.C
 		return tmr
 	}
+	// NewTimer(0) fires from a new goroutine, which can run before or after the call.
+	zeroDuration := func(_ context.Context, m *quartz.Mock) *quartz.Timer { return m.NewTimer(0) }
 	stop := func(tmr *quartz.Timer) bool { return tmr.Stop() }
 	reset := func(tmr *quartz.Timer) bool { return tmr.Reset(time.Hour) }
 	// stopAndDrain is the way to stop a timer before Go 1.23. It returns false if the receive
@@ -547,11 +549,18 @@ func TestTimer_StopAndReset(t *testing.T) {
 		start func(context.Context, *quartz.Mock) *quartz.Timer
 		call  func(*quartz.Timer) bool
 		want  bool
+		// wantNext is how long after the call the timer fires, or 0 if it does not.
+		wantNext time.Duration
 	}{
 		{name: "StopFiredUnread", start: fired, call: stop, want: true},
 		{name: "StopFiredReceived", start: firedAndReceived, call: stop, want: false},
-		{name: "ResetFiredUnread", start: fired, call: reset, want: true},
+		{name: "ResetFiredUnread", start: fired, call: reset, want: true, wantNext: time.Hour},
 		{name: "StopAndDrainFiredUnread", start: fired, call: stopAndDrain, want: true},
+		{name: "StopZeroDuration", start: zeroDuration, call: stop, want: true},
+		{
+			name: "ResetZeroDuration", start: zeroDuration, call: reset,
+			want: true, wantNext: time.Hour,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -559,16 +568,20 @@ func TestTimer_StopAndReset(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 
-				tmr := tc.start(ctx, quartz.NewMock(t))
+				mClock := quartz.NewMock(t)
+				tmr := tc.start(ctx, mClock)
 				if got := tc.call(tmr); got != tc.want {
 					t.Errorf("got %v, want %v", got, tc.want)
 				}
-				// Lets any goroutine that could still send on C run before the check.
+				// Lets any goroutine that could still send on C run before the checks.
 				synctest.Wait()
 				select {
 				case tme := <-tmr.C:
 					t.Errorf("received %s after the call returned", tme)
 				default:
+				}
+				if next, _ := mClock.Peek(); next != tc.wantNext {
+					t.Errorf("timer fires in %s, want %s", next, tc.wantNext)
 				}
 			})
 		})
@@ -726,8 +739,9 @@ func TestNoLeak_Go123(t *testing.T) {
 		mClock.Advance(1 * time.Second).MustWait(ctx)
 	})
 
-	// NewTimer and Reset fire a timer with a non-positive duration from a new goroutine, so both
-	// fires can start a write before either ends. Over 100 rounds, that happens in most of them.
+	// NewTimer(0) and Reset(0) each fire the timer from a new goroutine, and in most of 100 rounds
+	// both run after Reset. Only one of them may start a write: the Mock tracks one write per
+	// timer, so its cleanup would not end a second one.
 	t.Run("TimerFiredTwice", func(t *testing.T) {
 		t.Parallel()
 		for range 100 {

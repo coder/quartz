@@ -102,6 +102,7 @@ func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
+		t.nxt = m.cur
 		go t.fire(t.mock.cur)
 		return t
 	}
@@ -123,6 +124,7 @@ func (m *Mock) AfterFunc(d time.Duration, f func(), tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
+		t.nxt = m.cur
 		go t.fire(t.mock.cur)
 		return t
 	}

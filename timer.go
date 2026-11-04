@@ -34,6 +34,14 @@ type Timer struct {
 
 func (t *Timer) fire(tt time.Time) {
 	t.mock.mu.Lock()
+	// A fire that gets the lock after Stop or Reset belongs to the schedule they replaced: Stop
+	// stops the timer, and Reset moves nxt. Both happen when NewTimer or Reset fires a
+	// non-positive duration from a new goroutine, and when Stop or Reset gets the lock before a
+	// fire that Advance started.
+	if t.stopped || !t.nxt.Equal(tt) {
+		t.mock.mu.Unlock()
+		return
+	}
 	t.mock.removeTimerLocked(t)
 	if t.fn != nil {
 		t.mock.mu.Unlock()
@@ -48,10 +56,6 @@ func (t *Timer) fire(tt time.Time) {
 		default:
 		}
 	} else {
-		// Reset and NewTimer fire a timer with a non-positive duration from a new goroutine, so the
-		// timer can fire again before the write from an earlier fire has ended. writes tracks one
-		// write per timer, so end the earlier one, as Reset would.
-		t.endWriteLocked()
 		interrupt := make(chan struct{})
 		t.interrupt = interrupt
 		t.mock.writes[t] = struct{}{}
@@ -151,6 +155,7 @@ func (t *Timer) Reset(d time.Duration, tags ...string) bool {
 		// zero or negative duration timer means we should immediately re-fire
 		// it, rather than re-add it.
 		t.stopped = false
+		t.nxt = t.mock.cur
 		go t.fire(t.mock.cur)
 		return result
 	}
