@@ -764,7 +764,7 @@ func TestNoLeak_Go123(t *testing.T) {
 	// NewTimer(0) and Reset(0) each fire the timer from a new goroutine, and in most of 100 rounds
 	// both run after Reset. Only one of them may start a write: the Mock tracks one write per
 	// timer, so its cleanup would not end a second one.
-	t.Run("TimerFiredTwice", func(t *testing.T) {
+	t.Run("ZeroDurationTimerResetToZero", func(t *testing.T) {
 		t.Parallel()
 		for range 100 {
 			tmr := quartz.NewMock(t).WithLogger(quartz.NoOpLogger).NewTimer(0)
