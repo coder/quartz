@@ -13,6 +13,8 @@ type Ticker struct {
 	mock          *Mock          // mock clock, if set
 	stopped       bool           // true if the ticker is not running
 	internalTicks chan time.Time // used to deliver ticks to the runLoop goroutine
+	// resets is how Reset tells runLoop to drop a tick from the old schedule.
+	resets chan struct{}
 
 	// As of Go 1.23, ticker channels are unbuffered and guaranteed to block forever after a call to
 	// stop.
@@ -100,10 +102,14 @@ func (t *Ticker) Reset(d time.Duration, tags ...string) {
 	} else {
 		t.mock.recomputeNextLocked()
 	}
-	// A tick that runLoop holds for a reader belongs to the old schedule, and stopping runLoop
-	// drops it.
-	t.stopRunLoopLocked()
-	t.startRunLoopLocked()
+	if t.interrupt == nil {
+		t.startRunLoopLocked()
+		return
+	}
+	// A tick that runLoop holds for a reader belongs to the old schedule, so runLoop drops it. A
+	// new runLoop would belong to the caller's synctest bubble and wait on channels created
+	// outside it, which keeps the bubble from ending.
+	t.resets <- struct{}{}
 }
 
 func (t *Ticker) runLoop(interrupt chan struct{}) {
@@ -126,10 +132,13 @@ outer:
 					continue outer
 				case <-t.internalTicks:
 					// Discard future ticks until we can send this one.
+				case <-t.resets:
+					continue outer
 				case interrupt <- struct{}{}:
 					return
 				}
 			}
+		case <-t.resets:
 		case interrupt <- struct{}{}:
 			return
 		}
@@ -171,6 +180,7 @@ func newMockTickerLocked(m *Mock, d time.Duration) *Ticker {
 		nxt:           m.cur.Add(d),
 		mock:          m,
 		internalTicks: make(chan time.Time),
+		resets:        make(chan struct{}),
 	}
 	m.addEventLocked(t)
 	t.startRunLoopLocked()
