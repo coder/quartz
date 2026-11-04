@@ -873,7 +873,6 @@ func TestTicker_ResetInBubble(t *testing.T) {
 
 	mClock := quartz.NewMock(t)
 	tkr := mClock.NewTicker(time.Second)
-	defer tkr.Stop()
 	synctest.Test(t, func(*testing.T) { tkr.Reset(time.Hour) })
 	mClock.Advance(time.Hour).MustWait(ctx)
 	select {
@@ -931,7 +930,6 @@ func TestTicker_StopAndReset(t *testing.T) {
 				if next, _ := mClock.Peek(); next != tc.wantNext {
 					t.Errorf("ticker ticks in %s, want %s", next, tc.wantNext)
 				}
-				tkr.Stop()
 			})
 		})
 	}
