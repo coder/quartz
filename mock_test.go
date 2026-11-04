@@ -843,25 +843,6 @@ func TestNoLeak_Go123(t *testing.T) {
 	})
 }
 
-// TestTickerReset_NonPositiveDuration checks that Reset panics for a duration that is not positive,
-// as time.Ticker.Reset and NewTicker do. A mock ticker with such a period made the next fire loop
-// forever with the Mock's lock held.
-func TestTickerReset_NonPositiveDuration(t *testing.T) {
-	t.Parallel()
-	for _, d := range []time.Duration{0, -time.Second} {
-		t.Run(d.String(), func(t *testing.T) {
-			t.Parallel()
-			tkr := quartz.NewMock(t).NewTicker(time.Second)
-			defer func() {
-				if recover() == nil {
-					t.Errorf("Reset(%s) did not panic", d)
-				}
-			}()
-			tkr.Reset(d)
-		})
-	}
-}
-
 // TestTicker_ResetInBubble resets a running ticker from a synctest bubble that did not create its
 // Mock. Reset must start no goroutine there: one waiting on the Mock's channels, which belong to no
 // bubble, keeps synctest.Test from returning, and go test -timeout then stops the run with this
@@ -931,6 +912,25 @@ func TestTicker_StopAndReset(t *testing.T) {
 					t.Errorf("ticker ticks in %s, want %s", next, tc.wantNext)
 				}
 			})
+		})
+	}
+}
+
+// TestTickerReset_NonPositiveDuration checks that Reset panics for a duration that is not positive,
+// as time.Ticker.Reset and NewTicker do. A mock ticker with such a period made the next fire loop
+// forever with the Mock's lock held.
+func TestTickerReset_NonPositiveDuration(t *testing.T) {
+	t.Parallel()
+	for _, d := range []time.Duration{0, -time.Second} {
+		t.Run(d.String(), func(t *testing.T) {
+			t.Parallel()
+			tkr := quartz.NewMock(t).NewTicker(time.Second)
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Reset(%s) did not panic", d)
+				}
+			}()
+			tkr.Reset(d)
 		})
 	}
 }
