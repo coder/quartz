@@ -328,6 +328,11 @@ if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 }
 ```
 
+`mClock.Trap().WithTimeout()` traps `WithTimeout` and `WithTimeoutCause` calls, and
+`mClock.Trap().WithDeadline()` traps `WithDeadline` and `WithDeadlineCause` calls, so a test keeps
+working if the code switches variants. The trapped call's `Cause` field holds the cause passed to a
+cause variant.
+
 A canceled parent cancels the child. A parent created with `context.WithDeadline` or
 `context.WithTimeout` can still cancel the child on wall time because Quartz does not convert
 parent deadlines to mock time.
@@ -366,11 +371,6 @@ contexts created after the test ended are returned already canceled with that ca
 
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
-
-To trap the calls that create a context, use `mClock.Trap().WithTimeout()`, which also catches
-`WithTimeoutCause` calls, or `mClock.Trap().WithDeadline()`, which also catches `WithDeadlineCause`
-calls. The test then keeps working if the code switches variants. The trapped call's `Cause` field
-holds the cause passed to a cause variant.
 
 #### `Deadline()` does not report mock time
 
