@@ -342,6 +342,12 @@ only then. Wait on the derived context's `Done()` or on that earlier channel ins
 derived context's `Err()`:
 
 ```go
+parent, cancelParent := context.WithCancel(context.Background())
+ctx, cancel := mClock.WithTimeout(parent, time.Minute)
+defer cancel()
+child, cancelChild := context.WithCancel(ctx)
+defer cancelChild()
+
 cancelParent()
 select {
 case <-child.Done():
@@ -350,9 +356,8 @@ case <-testCtx.Done():
 }
 ```
 
-Contexts that are still live when the test ends are canceled with cause
-`quartz.ErrMockClockTestEnded`, and contexts created after the test ended are returned already
-canceled with that cause.
+Contexts still live when the test ends are canceled with cause `quartz.ErrMockClockTestEnded`, and
+contexts created after the test ended are returned already canceled with that cause.
 
 Call the returned cancel function as you would for `context.WithTimeout`. It is idempotent and
 removes the pending mock event. Cause variants preserve the cause for `context.Cause`.
