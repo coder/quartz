@@ -657,8 +657,10 @@ func (p *blockingErrCtx) Err() error {
 	return p.Context.Err()
 }
 
-// A mock context behind context.WithoutCancel is not part of its ancestor's cancellation, so
-// canceling the ancestor does not wait for it, even while another goroutine is canceling it.
+// A mock context behind context.WithoutCancel is not part of its ancestor's cancellation, so a
+// stalled cancellation of that detached subtree does not delay canceling the ancestor. The layer's
+// Err blocks, which mock contexts do not support, only to hold the detached cancellation in
+// progress: canceling the ancestor never reads that layer.
 func TestWithTimeout_CancelDoesNotWaitForDetachedContexts(t *testing.T) {
 	t.Parallel()
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
