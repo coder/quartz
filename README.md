@@ -164,6 +164,12 @@ func TestAdvanceTooFar(t *testing.T) {
 }
 ```
 
+The failure names the events that stop the clock and the calls that created them:
+
+```
+cannot advance 2s which is beyond next event in 1s: timer from AfterFunc(..., [])
+```
+
 This is a deliberate design decision to allow `Advance()` to immediately and synchronously move the
 clock forward (even without calling `Wait()` on returned waiter). This helps meet Quartz's design
 goals of writing deterministic and easy to understand unit tests. It also allows the clock to be
