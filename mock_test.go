@@ -391,8 +391,8 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 		// want must be in the error.
 		want string
 	}{
-		{name: "OneTrap", traps: 1, want: "already expired when Release was called; this trap released"},
-		{name: "TwoTraps", traps: 2, want: "already expired when Release was called; this trap released"},
+		{name: "OneTrap", traps: 1, want: "context already expired; this trap released"},
+		{name: "TwoTraps", traps: 2, want: "context already expired; this trap released"},
 		{name: "OneTrapWhileWaiting", traps: 1, whileWaiting: true, want: "complete after release"},
 		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, want: "2 traps caught it"},
 	} {
@@ -498,7 +498,7 @@ func TestCallRelease_ExpiredContext(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("the call did not return after MustRelease")
 		}
-		wantMessages(t, tb.messages, "MustRelease of Now([before]): context already expired")
+		wantMessages(t, tb.messages, "MustRelease of Now([before]): context already expired; this trap")
 	})
 }
 
