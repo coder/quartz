@@ -912,8 +912,15 @@ func (c *mockCtx) fire(_ time.Time) {
 	<-c.finished
 }
 
-// checkParent cancels c if its parent is done.
+// checkParent cancels c if its parent is done. A canceled c returns without reading the parent:
+// cancel reads the parent again, and each read checks the grandparent the same way, so reading a
+// canceled chain of mock contexts would cost parent reads exponential in its depth.
 func (c *mockCtx) checkParent() {
+	select {
+	case <-c.done:
+		return
+	default:
+	}
 	if c.parent.Err() != nil {
 		c.cancel(context.Canceled, nil)
 	}

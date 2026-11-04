@@ -416,7 +416,9 @@ type embeddingCtx struct{ context.Context }
 // descendants returns contexts derived from ctx directly and through layers that do not cancel,
 // each done before the call that cancels ctx returns. The Mock cases derive a mock context and
 // return a stdlib context derived from it: reading the mock context itself would check its parent
-// and cancel it, hiding a missed notification.
+// and cancel it, hiding a missed notification. If reads of a canceled chain of mock contexts cost
+// time exponential in its depth again, canceling ctx hangs on DeepMockChain, and go test -timeout
+// reports it by naming the test.
 func descendants(
 	t *testing.T, mClock *quartz.Mock, ctx context.Context,
 ) map[string]context.Context {
@@ -425,19 +427,23 @@ func descendants(
 		t.Cleanup(cancel)
 		return child
 	}
-	throughMock := func(parent context.Context) context.Context {
-		nested, cancel := mClock.WithTimeout(parent, time.Hour)
-		t.Cleanup(cancel)
-		return withCancel(nested)
+	throughMocks := func(parent context.Context, depth int) context.Context {
+		for range depth {
+			nested, cancel := mClock.WithTimeout(parent, time.Hour)
+			t.Cleanup(cancel)
+			parent = nested
+		}
+		return withCancel(parent)
 	}
 	return map[string]context.Context{
 		"Direct":               withCancel(ctx),
 		"WithValue":            withCancel(context.WithValue(ctx, ctxKey{}, "v")),
 		"Embedding":            withCancel(embeddingCtx{ctx}),
-		"Mock":                 throughMock(ctx),
-		"MockWithValue":        throughMock(context.WithValue(ctx, ctxKey{}, "v")),
-		"MockEmbedding":        throughMock(embeddingCtx{ctx}),
-		"MockBehindWithCancel": throughMock(withCancel(ctx)),
+		"Mock":                 throughMocks(ctx, 1),
+		"MockWithValue":        throughMocks(context.WithValue(ctx, ctxKey{}, "v"), 1),
+		"MockEmbedding":        throughMocks(embeddingCtx{ctx}, 1),
+		"MockBehindWithCancel": throughMocks(withCancel(ctx), 1),
+		"DeepMockChain":        throughMocks(ctx, 30),
 	}
 }
 
