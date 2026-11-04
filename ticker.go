@@ -109,8 +109,8 @@ func (t *Ticker) Reset(d time.Duration, tags ...string) {
 	// Tell runLoop to drop a tick it holds for a reader, since that tick belongs to the old
 	// schedule. Starting a new runLoop instead would put a goroutine in the caller's synctest
 	// bubble that waits on channels created outside it, and synctest.Test would not return. The
-	// branch above still starts one for a stopped ticker, so a Reset inside a bubble of a stopped
-	// ticker created outside it hangs.
+	// branch above still starts one, so Reset, called inside a bubble, of a stopped ticker created
+	// outside that bubble, hangs.
 	t.resets <- struct{}{}
 }
 
