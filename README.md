@@ -369,19 +369,26 @@ removes the pending mock event. Cause variants preserve the cause for `context.C
 When the test ends, each mock context that is still live is canceled with cause
 `quartz.ErrMockClockTestEnded`, so code blocked on it can return. The cancellation is a cleanup that
 the context registers on the `t` passed to `NewMock` when it is created, and cleanups run last
-registered first. So a cleanup registered before the context was created, such as a
-`t.Cleanup(srv.Close)` that waits for a handler blocked on the context, sees it canceled and does
-not hang, while cleanups registered after see it live. A subtest's cleanups run before its parent's,
-so if a subtest uses a `*Mock` created with the parent's `t`, its contexts are still live there and
-such a `srv.Close` hangs; create the `*Mock` with the subtest's `t`. A context created after the
-test ended, for example by a goroutine that outlived it, is returned already canceled with the same
-cause.
+registered first. So a cleanup that was registered before the context and had not started when the
+context was created, such as a `t.Cleanup(srv.Close)` that waits for a handler blocked on the
+context, sees it canceled and does not hang, while cleanups registered after the context see it
+live. A context created after the test ended, for example by a goroutine that outlived it, is
+returned already canceled with the same cause.
+
+Such a `srv.Close` still hangs in two cases:
+
+- The handler creates the context after `srv.Close` started. The context is canceled only after that
+  cleanup returns. Derive the context from `t.Context()` (Go 1.24 or later), which is canceled
+  before any cleanup runs; for a server, return it from `srv.Config.BaseContext` and derive from
+  `r.Context()`.
+- A subtest uses a `*Mock` created with its parent's `t`. A subtest's cleanups run before its
+  parent's, so the context is still live in them. Create the `*Mock` with the subtest's `t`.
 
 Mock timers and tickers are not canceled. A ticker from `NewTicker` stops sending on `C` in a
 cleanup that it registers when it is created, and a timer from `NewTimer` drops its unread value in
-a cleanup that it registers when it fires. A cleanup registered before those cannot receive from
-`C`, so if it waits for code that reads `C`, have that code also select on a context that is done by
-then, such as a mock context created after the cleanup was registered.
+a cleanup that it registers when it fires. So if the ticker was created, or the timer fired, after a
+cleanup was registered and before it started, code that the cleanup waits for cannot receive from
+`C`. Have that code also select on a context that is done by then, such as `t.Context()`.
 
 #### `Deadline()` does not report mock time
 
