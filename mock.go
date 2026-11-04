@@ -762,7 +762,8 @@ type Trap struct {
 	calls chan *apiCall
 	done  chan struct{}
 
-	// mu protects the unreleasedCalls count
+	// mu protects the unreleasedCalls count. Close takes mu while holding Mock.mu, so do not take
+	// Mock.mu while holding mu.
 	mu              sync.Mutex
 	unreleasedCalls int
 }
@@ -800,9 +801,12 @@ func (t *Trap) Close() {
 		return // already closed
 	default:
 	}
-	if t.unreleasedCalls != 0 {
+	t.mu.Lock()
+	unreleased := t.unreleasedCalls
+	t.mu.Unlock()
+	if unreleased != 0 {
 		t.mock.tb.Helper()
-		t.mock.tb.Errorf("%s Closed() with %d unreleased calls", t, t.unreleasedCalls)
+		t.mock.tb.Errorf("%s Closed() with %d unreleased calls", t, unreleased)
 	}
 	for i, tr := range t.mock.traps {
 		if t == tr {
