@@ -65,9 +65,10 @@ mClock.Set(time.Date(2021, 6, 18, 12, 0, 0, 0, time.UTC)) // June 18, 2021 @ 12p
 
 #### Advancing the clock
 
-Once you create timers, tickers, or [mock contexts](#contexts), you cannot change the time backward,
-only advance it forward. You may continue to use `Set()`, but it is often easier and clearer to use
-`Advance()`.
+While a timer, ticker, or [mock context](#contexts) is scheduled, you cannot change the time
+backward, only advance it forward. A timer is scheduled until it fires or is stopped, a ticker until
+it is stopped, and a mock context until it expires or is canceled. You may continue to use `Set()`,
+but it is often easier and clearer to use `Advance()`.
 
 For example, with a timer:
 
