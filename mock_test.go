@@ -849,22 +849,57 @@ func TestNoLeak_Go123(t *testing.T) {
 	})
 }
 
-func TestTickerStop_Go123(t *testing.T) {
+// TestTicker_StopAndReset checks that no tick is received after Stop or Reset returns, and that
+// Reset's period applies, as with a time.Ticker.
+func TestTicker_StopAndReset(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ticked := func(ctx context.Context, m *quartz.Mock) *quartz.Ticker {
+		tkr := m.NewTicker(time.Second)
+		m.Advance(time.Second).MustWait(ctx)
+		return tkr
+	}
+	// Advance fires the ticker from a new goroutine, which can run before or after the call.
+	advancing := func(_ context.Context, m *quartz.Mock) *quartz.Ticker {
+		tkr := m.NewTicker(time.Second)
+		_ = m.Advance(time.Second)
+		return tkr
+	}
+	stop := func(tkr *quartz.Ticker) { tkr.Stop() }
+	reset := func(tkr *quartz.Ticker) { tkr.Reset(time.Hour) }
+	for _, tc := range []struct {
+		name  string
+		start func(context.Context, *quartz.Mock) *quartz.Ticker
+		call  func(*quartz.Ticker)
+		// wantNext is how long after the call the ticker ticks, or 0 if it does not.
+		wantNext time.Duration
+	}{
+		{name: "StopTickedUnread", start: ticked, call: stop},
+		{name: "ResetTickedUnread", start: ticked, call: reset, wantNext: time.Hour},
+		{name: "StopDuringAdvance", start: advancing, call: stop},
+		{name: "ResetDuringAdvance", start: advancing, call: reset, wantNext: time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
 
-	mClock := quartz.NewMock(t)
-
-	tkr := mClock.NewTicker(1 * time.Second)
-	mClock.Advance(1 * time.Second).MustWait(ctx)
-	tkr.Stop()
-
-	select {
-	case tme := <-tkr.C:
-		t.Fatalf("got channel read after stop: %s", tme)
-	default:
-		// OK!
+				mClock := quartz.NewMock(t)
+				tkr := tc.start(ctx, mClock)
+				tc.call(tkr)
+				// Lets any goroutine that could still send on C run before the checks.
+				synctest.Wait()
+				select {
+				case tme := <-tkr.C:
+					t.Errorf("received %s after the call returned", tme)
+				default:
+				}
+				if next, _ := mClock.Peek(); next != tc.wantNext {
+					t.Errorf("ticker ticks in %s, want %s", next, tc.wantNext)
+				}
+				tkr.Stop()
+			})
+		})
 	}
 }
 

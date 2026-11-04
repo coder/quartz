@@ -32,7 +32,10 @@ type Ticker struct {
 func (t *Ticker) fire(tt time.Time) {
 	t.mock.mu.Lock()
 	defer t.mock.mu.Unlock()
-	if t.stopped {
+	// A fire that gets the lock after Stop or Reset belongs to the schedule they replaced: Stop
+	// stops the ticker, and Reset moves nxt. This happens when Stop or Reset gets the lock before
+	// a fire that Advance started.
+	if t.stopped || !t.nxt.Equal(tt) {
 		return
 	}
 	for !t.nxt.After(t.mock.cur) {
@@ -95,9 +98,10 @@ func (t *Ticker) Reset(d time.Duration, tags ...string) {
 	} else {
 		t.mock.recomputeNextLocked()
 	}
-	if t.interrupt == nil {
-		t.startRunLoopLocked()
-	}
+	// A tick that runLoop holds for a reader belongs to the old schedule, and stopping runLoop
+	// drops it.
+	t.stopRunLoopLocked()
+	t.startRunLoopLocked()
 }
 
 func (t *Ticker) runLoop(interrupt chan struct{}) {
