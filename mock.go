@@ -690,33 +690,36 @@ type Call struct {
 }
 
 // Release the call and wait for it to complete. If the provided context expires before the call completes, it returns
-// an error.
+// an error. If the context has already expired, Release still releases the call, and returns the error.
 //
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
 func (c *Call) Release(ctx context.Context) error {
+	// Read ctx before releasing: the call cannot complete before this release, so an expired ctx
+	// would otherwise pass only when the code under test returns before the select below. Release
+	// either way, or the code under test stays blocked.
+	expired := ctx.Err()
 	// Count the call as released before letting it return: once releases.Done runs, the code under
 	// test can return and the test can call Trap.Close, which must see the release.
 	c.trap.callReleased()
 	c.apiCall.releases.Done()
+	if expired != nil {
+		return c.releaseError(expired)
+	}
 	select {
 	case <-ctx.Done():
-		// Unlike the waits, Release reports completion even if ctx has also expired: the release
-		// has already happened and cannot be repeated, so the result is the only way the test
-		// learns whether the call completed. select picks a random ready case, so check again.
-		select {
-		case <-c.apiCall.complete:
-			return nil
-		default:
-		}
-		if c.apiCall.traps > 1 {
-			return fmt.Errorf("timed out waiting for the call to complete; %d traps caught it and each "+
-				"must release it: %w", c.apiCall.traps, ctx.Err())
-		}
-		return fmt.Errorf("timed out waiting for the call to complete after release: %w", ctx.Err())
+		return c.releaseError(ctx.Err())
 	case <-c.apiCall.complete:
 		return nil
 	}
+}
+
+func (c *Call) releaseError(err error) error {
+	if c.apiCall.traps > 1 {
+		return fmt.Errorf("timed out waiting for the call to complete; %d traps caught it and each "+
+			"must release it: %w", c.apiCall.traps, err)
+	}
+	return fmt.Errorf("timed out waiting for the call to complete after release: %w", err)
 }
 
 // MustRelease releases the call and waits for it to complete. If the provided context expires before the call

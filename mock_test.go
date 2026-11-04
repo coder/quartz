@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -372,46 +373,94 @@ func Test_MultipleTraps(t *testing.T) {
 	}
 }
 
-// Test_MultipleTrapsDeadlock verifies that Release fails while another trap still holds the call,
-// with an error that names the number of traps, and that the call still counts as released, so
-// Close does not report it.
-func Test_MultipleTrapsDeadlock(t *testing.T) {
+// TestCallRelease_ExpiredContext verifies that Release returns the context error when the context
+// expires before the call completes, still releases the call so that it returns, and names the
+// trap count only when more than one trap caught the call. Close must not report the call.
+func TestCallRelease_ExpiredContext(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	expired, cancelExpired := context.WithCancel(context.Background())
-	cancelExpired()
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	tb := &captureFailTB{TB: t}
-	mClock := quartz.NewMock(tb)
-	trap0 := mClock.Trap().Now("0")
-	trap1 := mClock.Trap().Now("1")
+	for _, tt := range []struct {
+		name  string
+		traps int
+		// whileWaiting gives Release a context that expires 10ms after Release is called, while
+		// Release waits for the other traps. The result is the same if it expires sooner.
+		whileWaiting bool
+		// hint must be in the error; if empty, the error must not mention traps.
+		hint string
+	}{
+		{name: "OneTrap", traps: 1},
+		{name: "TwoTraps", traps: 2, hint: "2 traps"},
+		{name: "TwoTrapsWhileWaiting", traps: 2, whileWaiting: true, hint: "2 traps"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 
-	go func() {
-		mClock.Now("0", "1")
-	}()
+			tb := &captureFailTB{TB: t}
+			mClock := quartz.NewMock(tb)
+			var tags []string
+			var traps []*quartz.Trap
+			for i := range tt.traps {
+				tags = append(tags, strconv.Itoa(i))
+				traps = append(traps, mClock.Trap().Now(tags[i]))
+			}
+			returned := make(chan struct{})
+			go func() {
+				defer close(returned)
+				mClock.Now(tags...)
+			}()
 
-	c0, err := trap0.Wait(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The call cannot complete until trap1 releases it too.
-	err = c0.Release(expired)
-	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "2 traps") {
-		t.Fatalf("Release() = %v, want %v naming 2 traps", err, context.Canceled)
-	}
-	c1, err := trap1.Wait(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c1.Release(ctx); err != nil {
-		t.Fatal(err)
-	}
+			c, err := traps[0].Wait(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			releaseCtx := expired
+			if tt.whileWaiting {
+				var cancelRelease context.CancelFunc
+				releaseCtx, cancelRelease = context.WithTimeout(ctx, 10*time.Millisecond)
+				defer cancelRelease()
+			}
+			errs := make(chan error, 1)
+			go func() { errs <- c.Release(releaseCtx) }()
+			select {
+			case err = <-errs:
+			case <-ctx.Done():
+				t.Fatal("Release() did not return after its context expired")
+			}
+			if releaseCtx.Err() == nil || !errors.Is(err, releaseCtx.Err()) {
+				t.Fatalf("Release() = %v, want %v", err, releaseCtx.Err())
+			}
+			if tt.hint == "" && strings.Contains(err.Error(), "trap") {
+				t.Fatalf("Release() = %q, want no mention of other traps", err)
+			}
+			if !strings.Contains(err.Error(), tt.hint) {
+				t.Fatalf("Release() = %q, want it to contain %q", err, tt.hint)
+			}
 
-	trap0.Close()
-	trap1.Close()
-	if tb.failed {
-		t.Fatal("Close() reported a failure after both calls were released")
+			for _, trap := range traps[1:] {
+				c, err := trap.Wait(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.Release(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-returned:
+			case <-ctx.Done():
+				t.Fatal("the call did not return after every trap released it")
+			}
+			for _, trap := range traps {
+				trap.Close()
+			}
+			if tb.failed {
+				t.Fatal("Close() reported a failure after every trap released the call")
+			}
+		})
 	}
 }
 
