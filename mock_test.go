@@ -707,6 +707,27 @@ func TestWithTimeout_PastDeadline(t *testing.T) {
 	}
 }
 
+// A goroutine that outlives its test can still create mock contexts. The test's cleanups have
+// already run, so the context must be done when it is returned.
+func TestWithTimeout_CreatedAfterTestEnd(t *testing.T) {
+	t.Parallel()
+
+	var mClock *quartz.Mock
+	// Not parallel, so Inner and its cleanups finish before t.Run returns.
+	t.Run("Inner", func(t *testing.T) {
+		mClock = quartz.NewMock(t)
+	})
+	ctx, cancel := mClock.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("expected Canceled, got %v", ctx.Err())
+	}
+	if got := context.Cause(ctx); !errors.Is(got, quartz.ErrMockClockTestEnded) {
+		t.Fatalf("expected cause ErrMockClockTestEnded, got %v", got)
+	}
+}
+
 func TestWithTimeout_CancelRace(t *testing.T) {
 	t.Parallel()
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
