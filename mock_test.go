@@ -623,8 +623,8 @@ func TestTickerStop_Go123(t *testing.T) {
 	}
 }
 
-// TestSynctestBubble checks that a Mock created outside a testing/synctest bubble panics in calls
-// inside the bubble that would start a goroutine, and that a Mock created inside does not.
+// TestSynctestBubble checks that a Mock created outside a testing/synctest bubble panics when used
+// inside the bubble, without changing its state, and that a Mock created inside does not panic.
 func TestSynctestBubble(t *testing.T) {
 	t.Parallel()
 
@@ -641,25 +641,25 @@ func TestSynctestBubble(t *testing.T) {
 			ctx := t.Context()
 			return func() { mClock.TickerFunc(ctx, time.Hour, func() error { return nil }) }
 		}},
+		{"NewTicker", func(_ *testing.T, mClock *quartz.Mock) func() {
+			return func() { mClock.NewTicker(time.Hour) }
+		}},
 		{"NewTimerZero", func(_ *testing.T, mClock *quartz.Mock) func() {
 			return func() { mClock.NewTimer(0) }
 		}},
 		{"AfterFuncZero", func(_ *testing.T, mClock *quartz.Mock) func() {
 			return func() { mClock.AfterFunc(0, func() {}) }
 		}},
-		{"TrappedCall", func(t *testing.T, mClock *quartz.Mock) func() {
-			trap := mClock.Trap().Now()
-			t.Cleanup(trap.Close)
-			go func() {
-				if c, err := trap.Wait(context.Background()); err == nil {
-					_ = c.Release(context.Background())
-				}
-			}()
+		{"Now", func(_ *testing.T, mClock *quartz.Mock) func() {
 			return func() { mClock.Now() }
 		}},
 		{"Advance", func(_ *testing.T, mClock *quartz.Mock) func() {
 			mClock.NewTimer(time.Second)
 			return func() { mClock.Advance(time.Second) }
+		}},
+		{"AdvanceNothingDue", func(_ *testing.T, mClock *quartz.Mock) func() {
+			mClock.NewTimer(time.Hour)
+			return func() { mClock.Advance(time.Minute) }
 		}},
 		{"Set", func(_ *testing.T, mClock *quartz.Mock) func() {
 			mClock.NewTimer(time.Second)
@@ -670,6 +670,12 @@ func TestSynctestBubble(t *testing.T) {
 			mClock.NewTimer(time.Second)
 			return func() { mClock.AdvanceNext() }
 		}},
+		{"Peek", func(_ *testing.T, mClock *quartz.Mock) func() {
+			return func() { mClock.Peek() }
+		}},
+		{"WithLogger", func(_ *testing.T, mClock *quartz.Mock) func() {
+			return func() { mClock.WithLogger(quartz.NoOpLogger) }
+		}},
 		{"TimerResetZero", func(_ *testing.T, mClock *quartz.Mock) func() {
 			tmr := mClock.NewTimer(time.Hour)
 			return func() { tmr.Reset(0) }
@@ -678,6 +684,41 @@ func TestSynctestBubble(t *testing.T) {
 			tkr := mClock.NewTicker(time.Hour)
 			tkr.Stop()
 			return func() { tkr.Reset(time.Hour) }
+		}},
+		{"AdvanceWaiter", func(_ *testing.T, mClock *quartz.Mock) func() {
+			w := mClock.Advance(0)
+			return func() { w.MustWait(context.Background()) }
+		}},
+		{"Trap", func(_ *testing.T, mClock *quartz.Mock) func() {
+			return func() { mClock.Trap().Now() }
+		}},
+		{"TrapClose", func(_ *testing.T, mClock *quartz.Mock) func() {
+			trap := mClock.Trap().Now()
+			return func() { trap.Close() }
+		}},
+		{"TrapWait", func(t *testing.T, mClock *quartz.Mock) func() {
+			trap := mClock.Trap().Now()
+			t.Cleanup(trap.Close)
+			go mClock.Now()
+			return func() {
+				trap.MustWait(context.Background()).MustRelease(context.Background())
+			}
+		}},
+		{"CallRelease", func(t *testing.T, mClock *quartz.Mock) func() {
+			trap := mClock.Trap().Now()
+			t.Cleanup(trap.Close)
+			go mClock.Now()
+			c := trap.MustWait(t.Context())
+			released := false
+			t.Cleanup(func() {
+				if !released {
+					c.MustRelease(context.Background())
+				}
+			})
+			return func() {
+				c.MustRelease(context.Background())
+				released = true
+			}
 		}},
 	}
 	// callInBubble calls newCall in a bubble, makes the call it returns, and returns the value that
@@ -697,10 +738,18 @@ func TestSynctestBubble(t *testing.T) {
 			t.Parallel()
 			t.Run("CreatedOutside", func(t *testing.T) {
 				t.Parallel()
-				call := tt.setup(t, quartz.NewMock(t))
+				mClock := quartz.NewMock(t)
+				call := tt.setup(t, mClock)
+				wantNext, wantOK := mClock.Peek()
 				got := callInBubble(t, func(*testing.T) func() { return call })
 				if got != wantPanic {
 					t.Fatalf("got panic %v, want %q", got, wantPanic)
+				}
+				// A timer or ticker that the call added or removed before panicking would change
+				// how far Advance can go.
+				if next, ok := mClock.Peek(); next != wantNext || ok != wantOK {
+					t.Fatalf("Peek() = %s, %t after the panic, want %s, %t",
+						next, ok, wantNext, wantOK)
 				}
 			})
 			t.Run("CreatedInside", func(t *testing.T) {

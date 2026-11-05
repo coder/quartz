@@ -66,9 +66,6 @@ func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, 
 	}
 	m.all = append(m.all, t)
 	m.recomputeNextLocked()
-	if m.inForeignBubble() {
-		panic(foreignBubblePanic)
-	}
 	go t.waitForCtx()
 	return t
 }
@@ -104,9 +101,6 @@ func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
-		if m.inForeignBubble() {
-			panic(foreignBubblePanic)
-		}
 		go t.fire(t.mock.cur)
 		return t
 	}
@@ -128,9 +122,6 @@ func (m *Mock) AfterFunc(d time.Duration, f func(), tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
-		if m.inForeignBubble() {
-			panic(foreignBubblePanic)
-		}
 		go t.fire(t.mock.cur)
 		return t
 	}
@@ -210,6 +201,7 @@ func (m *Mock) removeEventLocked(e event) {
 }
 
 func (m *Mock) matchCallLocked(c *apiCall) {
+	m.checkBubble()
 	var traps []*Trap
 	for _, t := range m.traps {
 		if t.matches(c) {
@@ -221,9 +213,6 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 	}
 	if len(traps) == 0 {
 		return
-	}
-	if m.inForeignBubble() {
-		panic(foreignBubblePanic)
 	}
 	c.releases.Add(len(traps))
 	m.mu.Unlock()
@@ -242,14 +231,14 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 // If multiple timers or tickers trigger simultaneously, they are all run on separate
 // go routines.
 type AdvanceWaiter struct {
-	tb TestingT
-	ch chan struct{}
+	mock *Mock
+	ch   chan struct{}
 }
 
 // Wait for all timers and ticks to complete, or until context expires.
 func (w AdvanceWaiter) Wait(ctx context.Context) error {
 	select {
-	case <-w.ch:
+	case <-w.Done():
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -260,17 +249,18 @@ func (w AdvanceWaiter) Wait(ctx context.Context) error {
 // context completes first.  MustWait must be called from the goroutine running the test or
 // benchmark, similar to `t.FailNow()`.
 func (w AdvanceWaiter) MustWait(ctx context.Context) {
-	w.tb.Helper()
+	w.mock.tb.Helper()
 	select {
-	case <-w.ch:
+	case <-w.Done():
 		return
 	case <-ctx.Done():
-		w.tb.Fatalf("context expired while waiting for clock to advance: %s", ctx.Err())
+		w.mock.tb.Fatalf("context expired while waiting for clock to advance: %s", ctx.Err())
 	}
 }
 
 // Done returns a channel that is closed when all timers and ticks complete.
 func (w AdvanceWaiter) Done() <-chan struct{} {
+	w.mock.checkBubble()
 	return w.ch
 }
 
@@ -282,8 +272,9 @@ func (w AdvanceWaiter) Done() <-chan struct{} {
 // If you need to advance exactly to the next event, and don't know or don't wish to calculate it,
 // consider AdvanceNext().
 func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
+	m.checkBubble()
 	m.tb.Helper()
-	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
+	w := AdvanceWaiter{mock: m, ch: make(chan struct{})}
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - Advance(%s)", d)
@@ -304,10 +295,6 @@ func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 		return w
 	}
 
-	if m.inForeignBubble() {
-		m.mu.Unlock()
-		panic(foreignBubblePanic)
-	}
 	m.cur = m.nextTime
 	go m.advanceLocked(w)
 	return w
@@ -336,8 +323,9 @@ func (m *Mock) advanceLocked(w AdvanceWaiter) {
 // Advance() with the difference.  You may only Set the time earlier than the current time before
 // starting tickers and timers (e.g. at the start of your test case).
 func (m *Mock) Set(t time.Time) AdvanceWaiter {
+	m.checkBubble()
 	m.tb.Helper()
-	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
+	w := AdvanceWaiter{mock: m, ch: make(chan struct{})}
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - Set(%s)", t)
@@ -368,10 +356,6 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 		return w
 	}
 
-	if m.inForeignBubble() {
-		m.mu.Unlock()
-		panic(foreignBubblePanic)
-	}
 	m.cur = m.nextTime
 	go m.advanceLocked(w)
 	return w
@@ -381,12 +365,13 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 // none scheduled.  It returns the duration the clock was advanced and a waiter that can be used to
 // wait for the timer/tick event(s) to finish.
 func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
+	m.checkBubble()
 	m.mu.Lock()
 	if !m.testOver {
 		m.logger.Logf("Mock Clock - AdvanceNext()")
 	}
 	m.tb.Helper()
-	w := AdvanceWaiter{tb: m.tb, ch: make(chan struct{})}
+	w := AdvanceWaiter{mock: m, ch: make(chan struct{})}
 	if m.nextTime.IsZero() {
 		defer close(w.ch)
 		defer m.mu.Unlock()
@@ -394,10 +379,6 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 		return 0, w
 	}
 	d := m.nextTime.Sub(m.cur)
-	if m.inForeignBubble() {
-		m.mu.Unlock()
-		panic(foreignBubblePanic)
-	}
 	m.cur = m.nextTime
 	go m.advanceLocked(w)
 	return d, w
@@ -407,6 +388,7 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 // true, or, if there are no running tickers or timers, it returns zero and
 // false.
 func (m *Mock) Peek() (d time.Duration, ok bool) {
+	m.checkBubble()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.nextTime.IsZero() {
@@ -475,6 +457,7 @@ func (m *Mock) Trap() Trapper {
 }
 
 func (m *Mock) newTrap(fn clockFunction, tags []string) *Trap {
+	m.checkBubble()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.testOver {
@@ -497,18 +480,18 @@ func (m *Mock) newTrap(fn clockFunction, tags []string) *Trap {
 //
 //	quartz.NewMock(t).WithLogger(quartz.NoOpLogger)
 func (m *Mock) WithLogger(l Logger) *Mock {
+	m.checkBubble()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.logger = l
 	return m
 }
 
-// NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
-// You may re-set the time earlier than this, but only before timers or tickers
-// are created.
+// NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024. You may re-set the
+// time earlier than this, but only before timers or tickers are created.
 //
 // In a testing/synctest bubble, call NewMock with the t that synctest.Test passes in. A Mock
-// created outside the bubble panics in calls inside it that would start a goroutine.
+// created outside the bubble panics when used inside it.
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {
@@ -531,17 +514,18 @@ func NewMock(tb TestingT) *Mock {
 
 var _ Clock = &Mock{}
 
-const foreignBubblePanic = "quartz: Mock used in a synctest bubble but created outside it; " +
-	"call NewMock with the t that synctest.Test passes in"
-
-// inForeignBubble reports whether the caller is in a testing/synctest bubble and m was created
-// outside one. Every call that would start a goroutine panics with foreignBubblePanic instead. The
-// goroutine would belong to the bubble, and synctest does not count a goroutine that waits on
-// channels created outside the bubble as durably blocked, so synctest.Test would wait for it until
-// go test times out. Goroutines that the Mock's goroutines start need no check: they belong to the
-// bubble of the call that started the first one.
-func (m *Mock) inForeignBubble() bool {
-	return !m.createdInBubble && inBubble()
+// checkBubble panics if the caller is in a testing/synctest bubble and m was created outside one.
+// Such a Mock can hang the test: a goroutine it starts in the bubble belongs to the bubble, and
+// synctest does not count a goroutine that waits on channels created outside the bubble as durably
+// blocked, so synctest.Test waits for it until go test times out. Every public method of m and of
+// the timers, tickers, traps, calls and waiters it returns calls checkBubble, directly or through
+// matchCallLocked, before it changes any state, so the rule is the same for every call and a
+// recovered panic leaves the Mock as it was.
+func (m *Mock) checkBubble() {
+	if !m.createdInBubble && inBubble() {
+		panic("quartz: Mock used in a synctest bubble but created outside it; " +
+			"call NewMock with the t that synctest.Test passes in")
+	}
 }
 
 // inBubble reports whether the caller is in a testing/synctest bubble, where time.Now returns a
@@ -750,6 +734,7 @@ type Call struct {
 // IMPORTANT: If a call is trapped by more than one trap, they all must release the call before it can complete, and
 // they must do so from different goroutines.
 func (c *Call) Release(ctx context.Context) error {
+	c.trap.mock.checkBubble()
 	c.apiCall.releases.Done()
 	select {
 	case <-ctx.Done():
@@ -834,6 +819,7 @@ func (t *Trap) matches(c *apiCall) bool {
 }
 
 func (t *Trap) Close() {
+	t.mock.checkBubble()
 	t.mock.mu.Lock()
 	defer t.mock.mu.Unlock()
 	select {
@@ -863,6 +849,7 @@ func (t *Trap) callReleased() {
 var ErrTrapClosed = errors.New("trap closed")
 
 func (t *Trap) Wait(ctx context.Context) (*Call, error) {
+	t.mock.checkBubble()
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()

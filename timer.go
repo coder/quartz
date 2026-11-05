@@ -110,9 +110,6 @@ func (t *Timer) Reset(d time.Duration, tags ...string) bool {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately re-fire
 		// it, rather than re-add it.
-		if t.mock.inForeignBubble() {
-			panic(foreignBubblePanic)
-		}
 		t.stopped = false
 		go t.fire(t.mock.cur)
 		return result

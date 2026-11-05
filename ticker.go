@@ -121,11 +121,6 @@ func (t *Ticker) startRunLoopLocked() {
 	if t.interrupt != nil {
 		t.mock.tb.Error("called startRunLoopLocked when interrupt suggests we are already running")
 	}
-	// Check before t.interrupt is set: the cleanup in newMockTickerLocked receives from it outside
-	// the bubble, which is fatal for a channel created in the bubble.
-	if t.mock.inForeignBubble() {
-		panic(foreignBubblePanic)
-	}
 	interrupt := make(chan struct{})
 	t.interrupt = interrupt
 	go t.runLoop(interrupt)
