@@ -531,12 +531,11 @@ func (m *Mock) checkBubble() {
 // inBubble reports whether the caller is in a testing/synctest bubble, where time.Now returns a
 // Time without a monotonic clock reading (see time_runtimeNow in runtime/time.go). That is runtime
 // behavior, not documented API: if bubble times gain a monotonic reading, inBubble reports false
-// and the Mock no longer panics in a bubble. Outside a bubble, package time documents that time.Now
-// has a monotonic reading, so inBubble does not report true there.
+// and the Mock no longer panics in a bubble. Outside a bubble, time.Now has a monotonic reading
+// while the wall clock is between 1885 and 2157 (see Now in time/time.go), so inBubble reports
+// false there.
 //
-// The bubble clock's documented start, midnight UTC 2000-01-01, is not used as a second signal.
-// Comparing time.Now with the Mock's creation time only adds detection if bubble times gain a
-// monotonic reading, and Before then compares monotonic readings; comparing wall clocks instead
+// The bubble clock's start time (2000-01-01) is not a usable second signal: comparing wall clocks
 // would panic outside a bubble when the system clock steps back.
 func inBubble() bool {
 	n := time.Now()
