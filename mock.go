@@ -30,7 +30,7 @@ type Mock struct {
 	logger   Logger
 	mu       sync.Mutex
 	testOver bool
-	// createdInBubble records whether NewMock ran in a testing/synctest bubble.
+	// createdInBubble is whether NewMock ran inside a testing/synctest bubble.
 	createdInBubble bool
 
 	// cur is the current time
@@ -490,11 +490,12 @@ func (m *Mock) WithLogger(l Logger) *Mock {
 	return m
 }
 
-// NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024. You may re-set the
-// time earlier than this, but only before timers or tickers are created.
+// NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
+// You may re-set the time earlier than this, but only before timers or tickers
+// are created.
 //
-// In a testing/synctest bubble, call NewMock with the t that synctest.Test passes in. A Mock
-// created outside the bubble panics when used inside it.
+// Inside a testing/synctest bubble, create the Mock with the t that synctest.Test passes to its
+// function. A Mock created outside the bubble panics when used inside it.
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {
@@ -517,13 +518,13 @@ func NewMock(tb TestingT) *Mock {
 
 var _ Clock = &Mock{}
 
-// checkBubble panics if the caller is in a testing/synctest bubble and m was created outside one.
-// Such a Mock can hang the test: a goroutine it starts in the bubble belongs to the bubble, and
-// synctest does not count a goroutine that waits on channels created outside the bubble as durably
-// blocked, so synctest.Test waits for it until go test times out. The public methods of m and of
-// the timers, tickers, traps, calls and waiters it returns call checkBubble, directly or through
-// matchCallLocked or newTrap, before they change any state, so a recovered panic leaves the Mock
-// as it was. The exceptions, Mock.Trap and Trap.String, change no state.
+// checkBubble panics if m was created outside a testing/synctest bubble and is used inside one.
+// Such use can hang the test: a goroutine that m starts in the bubble belongs to the bubble but
+// waits on channels created outside it, which synctest does not count as blocked, so synctest.Test
+// waits for it until go test times out.
+//
+// Public methods that change state call checkBubble before the change, directly or through
+// matchCallLocked or newTrap, so a recovered panic leaves m unchanged.
 func (m *Mock) checkBubble() {
 	if !m.createdInBubble && inBubble() {
 		panic("quartz: Mock used in a synctest bubble but created outside it; " +
@@ -531,18 +532,12 @@ func (m *Mock) checkBubble() {
 	}
 }
 
-// inBubble reports whether the caller is in a testing/synctest bubble, where time.Now returns a
-// Time without a monotonic clock reading (see time_runtimeNow in runtime/time.go). That is runtime
-// behavior, not documented API: if bubble times gain a monotonic reading, inBubble reports false
-// and the Mock no longer panics in a bubble. Outside a bubble, time.Now has a monotonic reading
-// while the wall clock is between 1885 and 2157 (see Now in time/time.go), so inBubble reports
-// false there.
-//
-// The bubble clock's start time (2000-01-01) is not a usable second signal: comparing wall clocks
-// would panic outside a bubble when the system clock steps back.
+// inBubble reports whether the caller runs inside a testing/synctest bubble, where time.Now
+// returns a Time without a monotonic reading (runtime.time_runtimeNow). This is runtime behavior,
+// not documented API. If it changes, inBubble reports false and checkBubble never panics.
 func inBubble() bool {
 	n := time.Now()
-	return n == n.Round(0) //nolint:staticcheck // Equal ignores the monotonic reading.
+	return n == n.Round(0) //nolint:staticcheck // Equal would ignore the monotonic reading.
 }
 
 type mockTickerFunc struct {

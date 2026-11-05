@@ -624,7 +624,7 @@ func TestTickerStop_Go123(t *testing.T) {
 }
 
 // TestSynctestBubble checks that a Mock created outside a testing/synctest bubble panics when used
-// inside the bubble, without changing its state, and that a Mock created inside does not panic.
+// inside it, before the call changes the Mock, and that a Mock created inside does not panic.
 func TestSynctestBubble(t *testing.T) {
 	t.Parallel()
 
@@ -633,8 +633,8 @@ func TestSynctestBubble(t *testing.T) {
 
 	tests := []struct {
 		name string
-		// setup runs where the Mock is created, with the same t, and returns the call to make
-		// inside the bubble.
+		// setup prepares the Mock and returns the call to make in the bubble. It runs where the
+		// Mock was created: outside the bubble for CreatedOutside, inside for CreatedInside.
 		setup func(t *testing.T, mClock *quartz.Mock) func()
 	}{
 		{"TickerFunc", func(t *testing.T, mClock *quartz.Mock) func() {
@@ -721,9 +721,8 @@ func TestSynctestBubble(t *testing.T) {
 			}
 		}},
 	}
-	// callInBubble calls newCall in a bubble, makes the call it returns, and returns the value that
-	// newCall or the call panicked with, if any. Recovering inside the bubble keeps synctest.Test
-	// from panicking in the outer test.
+	// callInBubble runs newCall and the call it returns in a bubble, and returns what either
+	// panicked with. Recovering inside the bubble keeps the panic from crashing the test binary.
 	callInBubble := func(t *testing.T, newCall func(*testing.T) func()) (got any) {
 		synctest.Test(t, func(t *testing.T) {
 			defer func() { got = recover() }()
@@ -745,8 +744,7 @@ func TestSynctestBubble(t *testing.T) {
 				if got != wantPanic {
 					t.Fatalf("got panic %v, want %q", got, wantPanic)
 				}
-				// A timer or ticker that the call added or removed before panicking would change
-				// how far Advance can go.
+				// An event that the call added or removed before panicking would change Peek.
 				if next, ok := mClock.Peek(); next != wantNext || ok != wantOK {
 					t.Fatalf("Peek() = %s, %t after the panic, want %s, %t",
 						next, ok, wantNext, wantOK)
