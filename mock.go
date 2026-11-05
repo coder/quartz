@@ -260,7 +260,10 @@ func (w AdvanceWaiter) MustWait(ctx context.Context) {
 
 // Done returns a channel that is closed when all timers and ticks complete.
 func (w AdvanceWaiter) Done() <-chan struct{} {
-	w.mock.checkBubble()
+	// A zero AdvanceWaiter has no Mock to check.
+	if w.mock != nil {
+		w.mock.checkBubble()
+	}
 	return w.ch
 }
 
@@ -517,10 +520,10 @@ var _ Clock = &Mock{}
 // checkBubble panics if the caller is in a testing/synctest bubble and m was created outside one.
 // Such a Mock can hang the test: a goroutine it starts in the bubble belongs to the bubble, and
 // synctest does not count a goroutine that waits on channels created outside the bubble as durably
-// blocked, so synctest.Test waits for it until go test times out. Every public method of m and of
-// the timers, tickers, traps, calls and waiters it returns calls checkBubble, directly or through
-// matchCallLocked, before it changes any state, so the rule is the same for every call and a
-// recovered panic leaves the Mock as it was.
+// blocked, so synctest.Test waits for it until go test times out. The public methods of m and of
+// the timers, tickers, traps, calls and waiters it returns call checkBubble, directly or through
+// matchCallLocked or newTrap, before they change any state, so a recovered panic leaves the Mock
+// as it was. The exceptions, Mock.Trap and Trap.String, change no state.
 func (m *Mock) checkBubble() {
 	if !m.createdInBubble && inBubble() {
 		panic("quartz: Mock used in a synctest bubble but created outside it; " +
