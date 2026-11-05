@@ -30,6 +30,8 @@ type Mock struct {
 	logger   Logger
 	mu       sync.Mutex
 	testOver bool
+	// createdInBubble records whether NewMock ran in a testing/synctest bubble.
+	createdInBubble bool
 
 	// cur is the current time
 	cur time.Time
@@ -64,6 +66,9 @@ func (m *Mock) TickerFunc(ctx context.Context, d time.Duration, f func() error, 
 	}
 	m.all = append(m.all, t)
 	m.recomputeNextLocked()
+	if m.inForeignBubble() {
+		panic(foreignBubblePanic)
+	}
 	go t.waitForCtx()
 	return t
 }
@@ -99,6 +104,9 @@ func (m *Mock) NewTimer(d time.Duration, tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
+		if m.inForeignBubble() {
+			panic(foreignBubblePanic)
+		}
 		go t.fire(t.mock.cur)
 		return t
 	}
@@ -120,6 +128,9 @@ func (m *Mock) AfterFunc(d time.Duration, f func(), tags ...string) *Timer {
 	if d <= 0 {
 		// zero or negative duration timer means we should immediately fire
 		// it, rather than add it.
+		if m.inForeignBubble() {
+			panic(foreignBubblePanic)
+		}
 		go t.fire(t.mock.cur)
 		return t
 	}
@@ -211,6 +222,9 @@ func (m *Mock) matchCallLocked(c *apiCall) {
 	if len(traps) == 0 {
 		return
 	}
+	if m.inForeignBubble() {
+		panic(foreignBubblePanic)
+	}
 	c.releases.Add(len(traps))
 	m.mu.Unlock()
 	for _, t := range traps {
@@ -290,6 +304,10 @@ func (m *Mock) Advance(d time.Duration) AdvanceWaiter {
 		return w
 	}
 
+	if m.inForeignBubble() {
+		m.mu.Unlock()
+		panic(foreignBubblePanic)
+	}
 	m.cur = m.nextTime
 	go m.advanceLocked(w)
 	return w
@@ -350,6 +368,10 @@ func (m *Mock) Set(t time.Time) AdvanceWaiter {
 		return w
 	}
 
+	if m.inForeignBubble() {
+		m.mu.Unlock()
+		panic(foreignBubblePanic)
+	}
 	m.cur = m.nextTime
 	go m.advanceLocked(w)
 	return w
@@ -372,6 +394,10 @@ func (m *Mock) AdvanceNext() (time.Duration, AdvanceWaiter) {
 		return 0, w
 	}
 	d := m.nextTime.Sub(m.cur)
+	if m.inForeignBubble() {
+		m.mu.Unlock()
+		panic(foreignBubblePanic)
+	}
 	m.cur = m.nextTime
 	go m.advanceLocked(w)
 	return d, w
@@ -480,15 +506,19 @@ func (m *Mock) WithLogger(l Logger) *Mock {
 // NewMock creates a new Mock with the time set to midnight UTC on Jan 1, 2024.
 // You may re-set the time earlier than this, but only before timers or tickers
 // are created.
+//
+// In a testing/synctest bubble, call NewMock with the t that synctest.Test passes in. A Mock
+// created outside the bubble panics in calls inside it that would start a goroutine.
 func NewMock(tb TestingT) *Mock {
 	cur, err := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
 	if err != nil {
 		panic(err)
 	}
 	m := &Mock{
-		tb:     tb,
-		logger: tb,
-		cur:    cur,
+		tb:              tb,
+		logger:          tb,
+		cur:             cur,
+		createdInBubble: inBubble(),
 	}
 	tb.Cleanup(func() {
 		m.mu.Lock()
@@ -500,6 +530,34 @@ func NewMock(tb TestingT) *Mock {
 }
 
 var _ Clock = &Mock{}
+
+const foreignBubblePanic = "quartz: Mock used in a synctest bubble but created outside it; " +
+	"call NewMock with the t that synctest.Test passes in"
+
+// inForeignBubble reports whether the caller is in a testing/synctest bubble and m was created
+// outside one. Every call that would start a goroutine panics with foreignBubblePanic instead. The
+// goroutine would belong to the bubble, and synctest does not count a goroutine that waits on
+// channels created outside the bubble as durably blocked, so synctest.Test would wait for it until
+// go test times out. Goroutines that the Mock's goroutines start need no check: they belong to the
+// bubble of the call that started the first one.
+func (m *Mock) inForeignBubble() bool {
+	return !m.createdInBubble && inBubble()
+}
+
+// inBubble reports whether the caller is in a testing/synctest bubble, where time.Now returns a
+// Time without a monotonic clock reading (see time_runtimeNow in runtime/time.go). That is runtime
+// behavior, not documented API: if bubble times gain a monotonic reading, inBubble reports false
+// and the Mock no longer panics in a bubble. Outside a bubble, package time documents that
+// time.Now has a monotonic reading, so inBubble does not report true there.
+//
+// The bubble clock's documented start, midnight UTC 2000-01-01, is not used as a second signal.
+// Comparing time.Now with the Mock's creation time only adds detection if bubble times gain a
+// monotonic reading, and Before then compares monotonic readings; comparing wall clocks instead
+// would panic outside a bubble when the system clock steps back.
+func inBubble() bool {
+	n := time.Now()
+	return n == n.Round(0)
+}
 
 type mockTickerFunc struct {
 	ctx  context.Context
