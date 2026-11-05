@@ -556,7 +556,7 @@ func (m *Mock) inForeignBubble() bool {
 // would panic outside a bubble when the system clock steps back.
 func inBubble() bool {
 	n := time.Now()
-	return n == n.Round(0)
+	return n == n.Round(0) //nolint:staticcheck // Equal ignores the monotonic reading.
 }
 
 type mockTickerFunc struct {
